@@ -1,0 +1,100 @@
+<?xml version="1.0"?>
+<views>
+	<view name="Enemies">'
+  <category name="Enemies - Overworld">
+    <attach sprite="0"/>
+    <attach sprite="1"/>
+    <attach sprite="19"/>
+    <attach sprite="51"/>
+    <attach sprite="55"/>
+  </category>
+  <category name="Enemies - Desert">
+    <attach sprite="180"/>
+    <attach sprite="351"/>
+  </category>
+  <category name="Enemies - Underground"/>
+  <category name="Enemies - Tower/Castle">
+    <attach sprite="136"/>
+    <attach sprite="137"/>
+    <attach sprite="138"/>
+  </category>
+  <category name="Enemies - Airship">
+    <attach sprite="175"/>
+    <attach sprite="176"/>
+  </category>
+  <category name="Enemies - Underwater / Beach">
+    <attach sprite="56"/>
+    <attach sprite="67"/>
+    <attach sprite="86"/>
+    <attach sprite="99"/>
+    <attach sprite="101"/>
+    <attach sprite="113"/>
+    <attach sprite="120"/>
+    <attach sprite="129"/>
+    <attach sprite="131"/>
+    <attach sprite="313"/>
+    <attach sprite="322"/>
+    <attach sprite="382"/>
+  </category>
+  <category name="Enemies - Lava"/>
+  <category name="Enemies - Snow"/>
+  <category name="Enemies - Jungle"/>
+  <category name="Enemies - Ghost House">
+    <attach sprite="218"/>
+    <attach sprite="219"/>
+    <attach sprite="220"/>
+    <attach sprite="221"/>
+    <attach sprite="305"/>
+    <attach sprite="320"/>
+  </category>
+  <category name="Enemies - Athletic"/>
+  <category name="Enemies - Big"/>	
+	</view>
+    <view name="Sorted By Number">
+        <category name="0-99">
+            <attach sprite="0-99"/>
+        </category>
+        <category name="100-199">
+            <attach sprite="100-199"/>
+        </category>
+        <category name="200-299">
+            <attach sprite="200-299"/>
+        </category>
+        <category name="300-325">
+            <attach sprite="300-325"/>
+        </category>
+    </view>
+	<view name="Unused">
+		<category name="Unused Working Sprites">
+			<attach sprite="112"/>
+			<attach sprite="143"/>
+			<attach sprite="198"/>
+			<attach sprite="200"/>	
+			<attach sprite="203"/>
+			<attach sprite="224"/>
+			<attach sprite="233"/>
+			<attach sprite="234"/>
+			<attach sprite="290"/>
+			<attach sprite="311"/>
+			<attach sprite="337"/>
+			<attach sprite="365"/>
+			<attach sprite="507"/>
+			<attach sprite="537"/>
+			<attach sprite="539"/>
+		</category>
+		<category name="Unused Crashing Sprites">
+			<attach sprite="125"/>
+			<attach sprite="126"/>
+			<attach sprite="127"/>
+			<attach sprite="128"/>
+			<attach sprite="199"/>
+			<attach sprite="267"/>
+			<attach sprite="306"/>
+			<attach sprite="529"/>
+			<attach sprite="572"/>
+		</category>		
+		<category name="Useless Sprites">
+			<attach sprite="197"/>
+		</category>				
+	</view>
+</views>
