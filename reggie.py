@@ -7811,7 +7811,7 @@ class EntranceEditorWidget(QtWidgets.QWidget):
 
 
     @QtCore.pyqtSlot(int)
-    def HandleEntranceTypeChanged(self, i):
+    def HandleEntranceIDChanged(self, i):
         """
         Handler for the entrance type changing
         """
