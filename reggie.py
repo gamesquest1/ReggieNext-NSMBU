@@ -1,10 +1,10 @@
 #!/usr/bin/python
 # -*- coding: latin-1 -*-
 
-# ReggieNext -- The NSMBU Editor fork
-# VERY early alpha, expect things to not work at all and explode in your face
-# Copyright (C) 2009-2015 Treeki, Tempus, angelsl, JasonP27, Kamek64,
-# MalStar1000, RoadrunnerWMC, MrRean
+# Reggie! - New Super Mario Bros. Wii Level Editor
+# Version Next Milestone 2 Alpha 4
+# Copyright (C) 2009-2014 Treeki, Tempus, angelsl, JasonP27, Kamek64,
+# MalStar1000, RoadrunnerWMC
 
 # This file is part of Reggie!.
 
@@ -79,7 +79,7 @@ import spritelib as SLib
 import sprites
 import TPLLib
 import gtx
-import yaz0
+import yaz0 as yaz0
 
 ReggieID = 'Reggie! Level Editor Next by Treeki, Tempus, RoadrunnerWMC'
 ReggieVersion = 'Next Milestone 2 Alpha 4'
@@ -2925,9 +2925,6 @@ class Level_NSMBU(AbstractLevel):
             except: pass
             outerArchive.addFile(SarcLib.File(szsThingName, szsData[szsThingName]))
 
-        # Make it easy for future Reggies to pick out the level name
-        outerArchive.addFile(SarcLib.File('levelname', fn.encode('utf-8')))
-
 
         return outerArchive.save(0x2000)
 
@@ -3163,6 +3160,9 @@ class AbstractParsedArea(AbstractArea):
                 course[FileOffset:FileOffset + blocksize] = block
             HeaderOffset += 8
             FileOffset += blocksize
+
+        with open('COURSE_X.bin', 'wb') as f:
+            f.write(bytes(course))
 
         # Return stuff
         return (
@@ -4686,6 +4686,11 @@ class LocationItem(LevelEditorItem):
 
                 if self.sizeChanged is not None:
                     self.sizeChanged(self, self.width, self.height)
+
+                if RealViewEnabled:
+                    for sprite in Area.sprites:
+                        if self.id in sprite.ImageObj.locationIDs and sprite.ImageObj.updateSceneAfterLocationMoved:
+                            self.scene().update()
 
             event.accept()
         else:
@@ -6478,9 +6483,9 @@ class ObjectPickerWidget(QtWidgets.QListView):
             self.itemsize = []
             QtCore.QAbstractListModel.__init__(self)
 
-            for i in range(256):
-                self.items.append(None)
-                self.ritems.append(None)
+            #for i in range(256):
+            #    self.items.append(None)
+            #    self.ritems.append(None)
 
         def rowCount(self, parent=None):
             """
@@ -7806,15 +7811,18 @@ class EntranceEditorWidget(QtWidgets.QWidget):
 
 
     @QtCore.pyqtSlot(int)
-    def HandleEntranceIDChanged(self, i):
+    def HandleEntranceTypeChanged(self, i):
         """
-        Handler for the entrance ID changing
+        Handler for the entrance type changing
         """
+        # UPDATED FOR NSMBU
         if self.UpdateFlag: return
         SetDirty()
-        self.ent.entid = i
+        self.ent.enttype = i
+        self.ent.TypeChange()
         self.ent.update()
         self.ent.UpdateTooltip()
+        mainWindow.scene.update()
         self.ent.UpdateListItem()
         self.editingLabel.setText(trans.string('EntranceDataEditor', 23, '[id]', i))
 
@@ -10752,7 +10760,7 @@ class LevelScene(QtWidgets.QGraphicsScene):
 
                         if tile == -1:
                             # Draw unknown tiles
-                            pix = None#Overrides[108].getCurrentTile()
+                            pix = Overrides[108].getCurrentTile()
                         elif tile is not None:
                             pix = tiles[tile].getCurrentTile()
 
@@ -10839,8 +10847,8 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
                     #[18:15:47]  Angel-SL: results in a sprite -2
 
                     # paint a sprite
-                    clickedx = int(clicked.x() // TileWidth) * 16
-                    clickedy = int(clicked.y() // TileWidth) * 16
+                    clickedx = int((clicked.x() - TileWidth / 2) / TileWidth / 2) * TileWidth / 3
+                    clickedy = int((clicked.y() - TileWidth / 2) / TileWidth / 2) * TileWidth / 3
 
                     data = mainWindow.defaultDataEditor.data
                     spr = SpriteItem(CurrentSprite, clickedx, clickedy, data)
@@ -10876,7 +10884,7 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
                 for ent in Area.entrances: getids[ent.entid] = True
                 minimumID = getids.index(False)
 
-                ent = EntranceItem(clickedx, clickedy, minimumID, 0, 0, 0, 0, 0, 0, 0x80, 0)
+                ent = EntranceItem(clickedx, clickedy, 0, minimumID, 0, 0, 0, 0, 0, 0, 0x80, 0, 0, 0, 0, 0)
                 mw = mainWindow
                 ent.positionChanged = mw.HandleEntPosChange
                 mw.scene.addItem(ent)
@@ -15820,7 +15828,6 @@ class ReggieWindow(QtWidgets.QMainWindow):
     """
     Reggie main level editor window
     """
-    ZoomLevel = 100
 
     def CreateAction(self, shortname, function, icon, text, statustext, shortcut, toggle=False):
         """
@@ -15922,18 +15929,92 @@ class ReggieWindow(QtWidgets.QMainWindow):
         self.SetupDocksAndPanels()
 
         # now get stuff ready
+        loaded = False
         curgame = self.CurrentGame
 
-        # load something
-        filetypes = ''
-        filetypes += trans.string('FileDlgs', 1) + ' (*.szs);;'
-        filetypes += 'Uncompressed Level Archives (*.sarc);;'
-        filetypes += trans.string('FileDlgs', 2) + ' (*)'
-        fn = QtWidgets.QFileDialog.getOpenFileName(self, trans.string('FileDlgs', 0), '', filetypes)[0]
-        if fn:
-            self.LoadLevel(curgame, fn, True, 1)
+        if not AutoOpenScriptEnabled:
+            if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]) and IsNSMBLevel(sys.argv[1]):
+                loaded = self.LoadLevel(curgame, sys.argv[1], True, 1)
+            elif settings.contains('LastLevelNSMBUversion') and False:
+                lastlevel = str(gamedef.GetLastLevel())
+                loaded = self.LoadLevel(curgame, lastlevel, True, 1)
+
+            if not loaded:
+                self.LoadLevel(curgame, FirstLevels[curgame], False, 1)
         else:
-            self.LoadLevel(curgame, FirstLevels[curgame], False, 1)
+            # Auto-level-opening script for rapid testing and analysis
+            pass
+
+            # To search for sprites, put this in the __init__ function of SpriteItem:
+            # for byte in range(8):
+            #     nyb1 = data[byte] >> 4
+            #     nyb2 = data[byte] & 0xF
+            #     if nyb1 not in SpriteDatas[type][byte * 2]:
+            #         SpriteDatas[type][byte * 2][nyb1] = []
+            #     if CurrentLevelNameForAutoOpenScript not in SpriteDatas[type][byte * 2][nyb1]:
+            #         SpriteDatas[type][byte * 2][nyb1].append(CurrentLevelNameForAutoOpenScript)
+            #     if nyb2 not in SpriteDatas[type][byte * 2 + 1]:
+            #         SpriteDatas[type][byte * 2 + 1][nyb2] = []
+            #     if CurrentLevelNameForAutoOpenScript not in SpriteDatas[type][byte * 2 + 1][nyb2]:
+            #         SpriteDatas[type][byte * 2 + 1][nyb2].append(CurrentLevelNameForAutoOpenScript)
+            # SpriteDatas[type][16].append(CurrentLevelNameForAutoOpenScript)
+            # ... and this before the auto-opening loop:
+            # global SpriteDatas
+            # SpriteDatas = []
+            # for i in range(724):
+            #     newlist = []
+            #     for nyb in range(16):
+            #         newlist.append({})
+            #     newlist.append([]) # list of all levels in which it's used
+            #     SpriteDatas.append(newlist)
+            # ... and this after the auto-opening loop:
+            # prints = ''
+            # for sprnum in range(724):
+            #     data = SpriteDatas[sprnum]
+            #     printedFirstThing = False
+            #     if not data[9]:
+            #         prints += 'Sprite %d is unused.\n' % sprnum
+            #     else:
+            #         prints += 'Sprite %d:\n' % sprnum
+            #         prints += '    Used in ' + ', '.join(sorted(set(data[16]))) + '\n'
+            #         for byte in range(8):
+            #             nyb1 = data[byte * 2]
+            #             nyb2 = data[byte * 2 + 1]
+            #             if len(nyb1) > 1 or (len(nyb1) == 1 and 0 not in nyb1):
+            #                 prints += '    Nybble %d:\n' % (byte * 2 + 1)
+            #                 for nybval, usedin in sorted(nyb1.items(), key=lambda thing: thing[0]):
+            #                     if usedin:
+            #                         prints += '        Value %s used in ' % hex(nybval)[2:]
+            #                         prints += ', '.join(sorted(usedin))
+            #                         prints += '\n'
+            #             if len(nyb2) > 1 or (len(nyb2) == 1 and 0 not in nyb2):
+            #                 prints += '    Nybble %d:\n' % (byte * 2 + 2)
+            #                 for nybval, usedin in sorted(nyb2.items(), key=lambda thing: thing[0]):
+            #                     if usedin:
+            #                         prints += '        Value %s used in ' % hex(nybval)[2:]
+            #                         prints += ', '.join(sorted(usedin))
+            #                         prints += '\n'
+            # print(prints)
+
+            # To search for Pa0 objects, put this in the __init__ method for ObjectItem:
+            # unknownvalues = (0, 1, 2, 3, 4, 6, 7, 10, 12, 19, 24, 25, 28, 31, 36, 38)
+            # if tileset == 0 and type in unknownvalues:
+            #     print('Unknown thing in %s: Type %d (at (%d, %d))' % (CurrentLevelNameForAutoOpenScript, type, x, y))
+
+            # Leave this here
+            global CurrentLevelNameForAutoOpenScript
+            for levelname in os.listdir(setting('GamePath_NSMBU')):
+                if not levelname.endswith(FileExtentions[curgame]): continue
+                print('Loading %s...' % levelname)
+                if 'NSLU' in levelname: continue
+                if '1-' in levelname or '2-' in levelname or '3-' in levelname or '4-' in levelname or '5-' in levelname or '6-' in levelname or '10-' in levelname or '11-' in levelname or '12-' in levelname or '13-' in levelname or '14-' in levelname or '15-' in levelname or '16-' in levelname or '17-' in levelname or '18-' in levelname or '19-' in levelname: continue
+                for areanum in range(4):
+                    try:
+                        CurrentLevelNameForAutoOpenScript = levelname[:-4] + ' A' + str(areanum + 1)
+                        print(CurrentLevelNameForAutoOpenScript)
+                        self.LoadLevel(NewSuperMarioBros2, os.path.join(setting('GamePath'), levelname), True, areanum + 1)
+                    except: raise
+
 
         QtCore.QTimer.singleShot(100, self.levelOverview.update)
 
@@ -17425,7 +17506,7 @@ class ReggieWindow(QtWidgets.QMainWindow):
                     if width < 1 or width > 1023: continue
                     if height < 1 or height > 511: continue
 
-                    newitem = ObjectItem(tileset, type, layer, objx, objy, width, height, 1)
+                    newitem = ObjectItem(tileset, type, layer, objx, objy, width, height, 1, 0, 0)
 
                     layers[layer].append(newitem)
 
@@ -17435,7 +17516,7 @@ class ReggieWindow(QtWidgets.QMainWindow):
 
                     objx = int(split[2])
                     objy = int(split[3])
-                    data = bytes(map(int, [split[4], split[5], split[6], split[7], split[8], split[9], '0', split[10], '0', '0', '0', '0', '0', '0']))
+                    data = bytes(map(int, [split[4], split[5], split[6], split[7], split[8], split[9], '0', split[10]]))
 
                     x = objx / 16
                     y = objy / 16
@@ -17629,9 +17710,9 @@ class ReggieWindow(QtWidgets.QMainWindow):
             return
 
         filetypes = ''
-        filetypes += trans.string('FileDlgs', 1) + ' (*.szs);;'
-        filetypes += 'Uncompressed Level Archives (*.sarc);;'
-        filetypes += trans.string('FileDlgs', 2) + ' (*)'
+        filetypes += trans.string('FileDlgs', 1) + ' (*.szs);;' # *.szs
+        filetypes += trans.string('FileDlgs', 5) + ' (*.szs.lh);;' # *.szs.LH
+        filetypes += trans.string('FileDlgs', 2) + ' (*)' # *
         fn = QtWidgets.QFileDialog.getOpenFileName(self, trans.string('FileDlgs', 0), '', filetypes)[0]
         if fn == '': return
 
@@ -17825,9 +17906,9 @@ class ReggieWindow(QtWidgets.QMainWindow):
         if self.CheckDirty(): return
 
         filetypes = ''
-        filetypes += trans.string('FileDlgs', 1) + ' (*.szs);;'
-        filetypes += 'Uncompressed Level Archives (*.sarc);;'
-        filetypes += trans.string('FileDlgs', 2) + ' (*)'
+        filetypes += trans.string('FileDlgs', 1) + ' (*.szs);;' # *.szs
+        filetypes += trans.string('FileDlgs', 5) + ' (*.szs.lh);;' # *.szs.LH
+        filetypes += trans.string('FileDlgs', 2) + ' (*)' # *
         fn = QtWidgets.QFileDialog.getOpenFileName(self, trans.string('FileDlgs', 0), '', filetypes)[0]
         if fn == '': return
         self.LoadLevel(None, str(fn), True, 1)
@@ -17865,7 +17946,7 @@ class ReggieWindow(QtWidgets.QMainWindow):
         """
         Save a level back to the archive, with a new filename
         """
-        fn = QtWidgets.QFileDialog.getSaveFileName(self, trans.string('FileDlgs', 3), '', 'Uncompressed Level Archives (*.sarc);;' + trans.string('FileDlgs', 2) + ' (*)')[0]
+        fn = QtWidgets.QFileDialog.getSaveFileName(self, trans.string('FileDlgs', 3), '', trans.string('FileDlgs', 1) + ' (*.szs);;' + trans.string('FileDlgs', 2) + ' (*)')[0]
         if fn == '': return
         fn = str(fn)
 
@@ -18444,7 +18525,7 @@ class ReggieWindow(QtWidgets.QMainWindow):
 
         name = checkname
 
-        if not (name.endswith('.szs') or name.endswith('.sarc')): return False # keep it from crashing by loading things it shouldn't
+        if not name.endswith('.szs'): return False # keep it from crashing by loading things it shouldn't
 
         # Get the data
         global RestoredFromAutoSave
@@ -18489,34 +18570,19 @@ class ReggieWindow(QtWidgets.QMainWindow):
         Dirty = False
         DirtyOverride += 1
 
+        # ----- BEGIN NSMBU CHANGES -------
+
         # Decompress it (Yaz0)
-        if levelData.startswith(b'Yaz0'):
-            print('Beginning Yaz0 decompression...')
-            levelData = yaz0.decompress(levelData)
-            print('Decompression finished.')
-        else:
-            print('Yaz0 decompression skipped.')
+        print('Begin')
+        levelData = yaz0.decompress(levelData)
+        print('End')
 
         arc = SarcLib.SARC_Archive()
         arc.load(levelData)
 
-        def exists(fn):
-            nonlocal arc
-            try: arc[fn]
-            except: return False
-            return True
-
-        possibilities = []
-        if exists('levelname'):
-            possibilities.append(arc['levelname'].data.decode('utf-8'))
-        possibilities.append(os.path.basename(name))
-        possibilities.append(possibilities[-1].split()[-1]) # for formats like "NSMBU 1-1.szs"
-        possibilities.append(possibilities[-1].split('.')[0])
-        for fn in possibilities:
-            if exists(fn):
-                levelFileData = arc[fn].data
-                break
-        else:
+        try:
+            levelFileData = arc[os.path.basename(name).split(' ')[-1][:-4]].data
+        except:
             return False
 
         # Sort the szs data
@@ -18526,6 +18592,8 @@ class ReggieWindow(QtWidgets.QMainWindow):
             szsData[file.name] = file.data
 
         levelData = levelFileData
+
+        # ---- END NSMBU CHANGES -----
 
         # Track progress.. but only if we don't have TPLLib
         # Cython version because otherwise it's far too fast.
@@ -20187,6 +20255,20 @@ def main():
         else:
             setSetting('GamePath_NSMBU', path)
             break
+
+    # check to see if we have anything saved
+    autofile = setting('AutoSaveFilePath')
+    if autofile is not None:
+        autofiledata = setting('AutoSaveFileData', 'x')
+        result = AutoSavedInfoDialog(autofile).exec_()
+        if result == QtWidgets.QDialog.Accepted:
+            global RestoredFromAutoSave, AutoSavePath, AutoSaveData
+            RestoredFromAutoSave = True
+            AutoSavePath = autofile
+            AutoSaveData = bytes(autofiledata, 'latin-1')
+        else:
+            setSetting('AutoSaveFilePath', 'none')
+            setSetting('AutoSaveFileData', 'x')
 
     # create and show the main window
     mainWindow = ReggieWindow()
