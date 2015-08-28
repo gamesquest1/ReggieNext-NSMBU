@@ -7629,37 +7629,6 @@ class EntranceEditorWidget(QtWidgets.QWidget):
         self.allowEntryCheckbox.setToolTip(trans.string('EntranceDataEditor', 9))
         self.allowEntryCheckbox.clicked.connect(self.HandleAllowEntryClicked)
 
-        # self.unknownFlagCheckbox = QtWidgets.QCheckBox(trans.string('EntranceDataEditor', 10))
-        # self.unknownFlagCheckbox.setToolTip(trans.string('EntranceDataEditor', 11))
-        # self.unknownFlagCheckbox.clicked.connect(self.HandleUnknownFlagClicked)
-
-        # self.connectedPipeCheckbox = QtWidgets.QCheckBox(trans.string('EntranceDataEditor', 12))
-        # self.connectedPipeCheckbox.setToolTip(trans.string('EntranceDataEditor', 13))
-        # self.connectedPipeCheckbox.clicked.connect(self.HandleConnectedPipeClicked)
-
-        # self.connectedPipeReverseCheckbox = QtWidgets.QCheckBox(trans.string('EntranceDataEditor', 14))
-        # self.connectedPipeReverseCheckbox.setToolTip(trans.string('EntranceDataEditor', 15))
-        # self.connectedPipeReverseCheckbox.clicked.connect(self.HandleConnectedPipeReverseClicked)
-
-        # self.pathID = QtWidgets.QSpinBox()
-        # self.pathID.setRange(0, 255)
-        # self.pathID.setToolTip(trans.string('EntranceDataEditor', 17))
-        # self.pathID.valueChanged.connect(self.HandlePathIDChanged)
-
-        # self.forwardPipeCheckbox = QtWidgets.QCheckBox(trans.string('EntranceDataEditor', 18))
-        # self.forwardPipeCheckbox.setToolTip(trans.string('EntranceDataEditor', 19))
-        # self.forwardPipeCheckbox.clicked.connect(self.HandleForwardPipeClicked)
-
-        # self.activeLayer = QtWidgets.QComboBox()
-        # self.activeLayer.addItems(trans.stringList('EntranceDataEditor', 21))
-        # self.activeLayer.setToolTip(trans.string('EntranceDataEditor', 22))
-        # self.activeLayer.activated.connect(self.HandleActiveLayerChanged)
-
-        # self.cpDirection = QtWidgets.QComboBox()
-        # self.cpDirection.addItems(trans.stringList('EntranceDataEditor', 27))
-        # self.cpDirection.setToolTip(trans.string('EntranceDataEditor', 26))
-        # self.cpDirection.activated.connect(self.HandleCpDirectionChanged)
-
         self.unk05 = QtWidgets.QSpinBox()
         self.unk05.setRange(0, 255)
         self.unk05.setToolTip('Unknown 0x05')
@@ -7742,19 +7711,6 @@ class EntranceEditorWidget(QtWidgets.QWidget):
         layout.addWidget(self.unk14, 13, 1)
         layout.addWidget(self.unk15, 14, 1)
         layout.addWidget(self.unk16, 15, 1)
-        # layout.addWidget(self.unknownFlagCheckbox, 6, 2, 1, 2)#, Qt.AlignRight)
-        # layout.addWidget(self.forwardPipeCheckbox, 7, 0, 1, 2)#, Qt.AlignRight)
-        # layout.addWidget(self.connectedPipeCheckbox, 7, 2, 1, 2)#, Qt.AlignRight)
-
-        # self.cpHorzLine = createHorzLine()
-        # layout.addWidget(self.cpHorzLine, 8, 0, 1, 4)
-        # layout.addWidget(self.connectedPipeReverseCheckbox, 9, 0, 1, 2)#, Qt.AlignRight)
-        # layout.addWidget(self.pathID, 9, 3, 1, 1)
-        # layout.addWidget(self.pathIDLabel, 9, 2, 1, 1, Qt.AlignRight)
-
-        # layout.addWidget(self.activeLayer, 4, 1, 1, 1)
-        # layout.addWidget(self.cpDirectionLabel, 10, 0, 1, 2, Qt.AlignRight)
-        # layout.addWidget(self.cpDirection, 10, 2, 1, 2)
 
         self.ent = None
         self.UpdateFlag = False
@@ -7785,27 +7741,6 @@ class EntranceEditorWidget(QtWidgets.QWidget):
         self.unk16.setValue(ent.unk16)
 
         self.allowEntryCheckbox.setChecked(((ent.entsettings & 0x80) == 0))
-        #self.unknownFlagCheckbox.setChecked(((ent.entsettings & 2) != 0))
-
-        # self.connectedPipeCheckbox.setVisible(ent.enttype in self.CanUseFlag8)
-        # self.connectedPipeCheckbox.setChecked(((ent.entsettings & 8) != 0))
-
-        # self.connectedPipeReverseCheckbox.setVisible(ent.enttype in self.CanUseFlag8 and ((ent.entsettings & 8) != 0))
-        # self.connectedPipeReverseCheckbox.setChecked(((ent.entsettings & 1) != 0))
-
-        # self.forwardPipeCheckbox.setVisible(ent.enttype in self.CanUseFlag4)
-        # self.forwardPipeCheckbox.setChecked(((ent.entsettings & 4) != 0))
-
-        # self.pathID.setVisible(ent.enttype in self.CanUseFlag8 and ((ent.entsettings & 8) != 0))
-        # self.pathID.setValue(ent.entpath)
-        # self.pathIDLabel.setVisible(ent.enttype in self.CanUseFlag8 and ((ent.entsettings & 8) != 0))
-
-        # self.cpDirection.setVisible(ent.enttype in self.CanUseFlag8 and ((ent.entsettings & 8) != 0))
-        # self.cpDirection.setCurrentIndex(ent.cpdirection)
-        # self.cpDirectionLabel.setVisible(ent.enttype in self.CanUseFlag8 and ((ent.entsettings & 8) != 0))
-        # self.cpHorzLine.setVisible(ent.enttype in self.CanUseFlag8 and ((ent.entsettings & 8) != 0))
-
-        # self.activeLayer.setCurrentIndex(ent.entlayer)
 
         self.UpdateFlag = False
 
@@ -7832,14 +7767,6 @@ class EntranceEditorWidget(QtWidgets.QWidget):
         """
         Handler for the entrance type changing
         """
-        self.connectedPipeCheckbox.setVisible(i in self.CanUseFlag8)
-        self.connectedPipeReverseCheckbox.setVisible(i in self.CanUseFlag8 and ((self.ent.entsettings & 8) != 0))
-        self.pathIDLabel.setVisible(i and ((self.ent.entsettings & 8) != 0))
-        self.pathID.setVisible(i and ((self.ent.entsettings & 8) != 0))
-        self.cpDirection.setVisible(self.ent.enttype in self.CanUseFlag8 and ((self.ent.entsettings & 8) != 0))
-        self.cpDirectionLabel.setVisible(self.ent.enttype in self.CanUseFlag8 and ((self.ent.entsettings & 8) != 0))
-        self.cpHorzLine.setVisible(self.ent.enttype in self.CanUseFlag8 and ((self.ent.entsettings & 8) != 0))
-        self.forwardPipeCheckbox.setVisible(i in self.CanUseFlag4)
         if self.UpdateFlag: return
         SetDirty()
         self.ent.enttype = i
@@ -13794,7 +13721,7 @@ class DiagnosticToolDialog(QtWidgets.QDialog):
         if mode == 'c': return problem
         elif problem:
             # make an entrance at 1024, 512 with an ID of Area.startEntrance
-            ent = EntranceItem(1024, 512, Area.startEntrance, 0, 0, 0, 0, 0, 0, 0x80, 0)
+            ent = EntranceItem(1024, 512, 0, Area.startEntrance, 0, 0, 0, 0, 0, 0, 0x80, 0, 0, 0, 0, 0)
             ent.positionChanged = mainWindow.HandleEntPosChange
             mainWindow.scene.addItem(ent)
 
