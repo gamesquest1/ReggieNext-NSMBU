@@ -1,10 +1,10 @@
 #!/usr/bin/python
 # -*- coding: latin-1 -*-
 
-# Reggie! - New Super Mario Bros. Wii Level Editor
+# Reggie! - New Super Mario Bros. U Level Editor
 # Version Next Milestone 2 Alpha 4
-# Copyright (C) 2009-2014 Treeki, Tempus, angelsl, JasonP27, Kamek64,
-# MalStar1000, RoadrunnerWMC
+# Copyright (C) 2009-2015 Treeki, Tempus, angelsl, JasonP27, Kamek64,
+# MalStar1000, RoadrunnerWMC, MrRean
 
 # This file is part of Reggie!.
 
@@ -20,7 +20,6 @@
 
 # You should have received a copy of the GNU General Public License
 # along with Reggie!.  If not, see <http://www.gnu.org/licenses/>.
-
 
 
 # reggie.py
@@ -72,21 +71,21 @@ except (ImportError, NameError):
 
 # Local imports
 import archive
+from dialog import * # bad but w/e
+import level
 import LHTool
 import lz77
 import SARC as SarcLib
 import spritelib as SLib
 import sprites
+import tile
 import TPLLib
 import gtx
-import yaz0 as yaz0
+import yaz0
 
-ReggieID = 'Reggie! Level Editor Next by Treeki, Tempus, RoadrunnerWMC'
+ReggieID = 'Reggie! Level Editor Next by Treeki, Tempus, RoadrunnerWMC, MrRean'
 ReggieVersion = 'Next Milestone 2 Alpha 4'
 UpdateURL = 'http://rvlution.net/reggie/updates.xml'
-
-TileWidth = 60
-
 
 if not hasattr(QtWidgets.QGraphicsItem, 'ItemSendsGeometryChanges'):
     # enables itemChange being called on QGraphicsItem
@@ -994,1452 +993,7 @@ class ChooseLevelNameDialog(QtWidgets.QDialog):
         if self.currentlevel is not None:
             self.currentlevel = str(self.currentlevel)
             self.accept()
-
-
-Tiles = None # 0x200 tiles per tileset, plus 64 for each type of override
-TilesetFilesLoaded = [None, None, None, None]
-TilesetAnimTimer = None
-TilesetCache = {} # Tileset cache, to avoid reloading when possible
-TilesetCompletelyCached = {}
-TileThreads = [None, None, None, None] # holds tileset-rendering threads
-Overrides = None # 320 tiles, this is put into Tiles usually
-TileBehaviours = None
-ObjectDefinitions = None # 4 tilesets
-TilesetsAnimating = False
-
-class ObjectDef():
-    """
-    Class for the object definitions
-    """
-
-    def __init__(self):
-        """
-        Constructor
-        """
-        self.width = 0
-        self.height = 0
-        self.rows = []
-
-    def load(self, source, offset, tileoffset):
-        """
-        Load an object definition
-        """
-        i = offset
-        row = []
-
-        while True:
-            cbyte = source[i]
-
-            if cbyte == 0xFE:
-                self.rows.append(row)
-                i += 1
-                row = []
-            elif cbyte == 0xFF:
-                return
-            elif (cbyte & 0x80) != 0:
-                row.append((cbyte,))
-                i += 1
-            else:
-                # extra = source[i+2]
-                # tilesetoffset = ((extra & 7) >> 1) * 256
-                # tile = (cbyte, source[i+1] + tilesetoffset, extra >> 2)
-                # row.append(tile)
-                # i += 3
-                extra = source[i+2]
-                tile = [cbyte, source[i+1] | ((extra & 3) << 8), extra >> 2]
-                row.append(tile)
-                i += 3
-
-
-class TilesetTile():
-    """
-    Class that represents a single tile in a tileset
-    """
-    def __init__(self, main):
-        """
-        Initializes the TilesetTile
-        """
-        self.main = main
-        self.isAnimated = False
-        self.animFrame = 0
-        self.animTiles = []
-        self.collData = ()
-        self.collOverlay = None
-        self.depthMap = None
-
-    def setMain(self, main):
-        """
-        Sets self.main
-        """
-        self.main = main
-
-    def addAnimationData(self, data):
-        """
-        Applies Newer-style animation data to the tile
-        """
-        animTiles = []
-        numberOfFrames = len(data) // 2048
-        for frame in range(numberOfFrames):
-            framedata = data[frame*2048: (frame*2048)+2048]
-            decoder = TPLLib.decoder(TPLLib.RGB4A3)
-            decoder = decoder(framedata, 32, 32)
-            newdata = decoder.run()
-            img = QtGui.QImage(newdata, 32, 32, 128, QtGui.QImage.Format_ARGB32)
-            pix = QtGui.QPixmap.fromImage(img.copy(0, 0, 31, 31).scaledToHeight(TileWidth, Qt.SmoothTransformation))
-            animTiles.append(pix)
-        self.animTiles = animTiles
-        self.isAnimated = True
-
-        # This NSMBLib method crashes.
-        ##padded = str(data)
-        ##padded += ' ' * (0x80000 - len(data))
-        ### It'll crash on this next line
-        ##rgbdata = NSMBLib.decodeTileAnims(padded)
-        ##tilesImg = QtGui.QImage(rgbdata, 32, (len(rgbdata)/4)/32, 32*4, QtGui.QImage.Format_ARGB32_Premultiplied)
-        ##tilesPix = QtGui.QPixmap.fromImage(tilesImg)
-
-        ##self.isAnimated = True
-        ##self.animTiles = []
-        ##self.animTiles.append(tilesPix.copy(0, 0, 31, 31).scaled(TileWidth, TileWidth))
-
-    def nextFrame(self):
-        """
-        Increments to the next frame
-        """
-        if not self.isAnimated: return
-        self.animFrame += 1
-        if self.animFrame == len(self.animTiles):
-            self.animFrame = 0
-
-    def resetAnimation(self):
-        """
-        Resets the animation frame
-        """
-        self.animFrame = 0
-
-    def getCurrentTile(self):
-        """
-        Returns the current tile based on the current animation frame
-        """
-        result = None
-        if (not TilesetsAnimating) or (not self.isAnimated): result = self.main
-        else: result = self.animTiles[self.animFrame]
-        result = QtGui.QPixmap(result)
-
-        p = QtGui.QPainter(result)
-        if CollisionsShown and (self.collOverlay is not None):
-            p.drawPixmap(0, 0, self.collOverlay)
-        if DepthShown and (self.depthMap is not None):
-            p.drawPixmap(0, 0, self.depthMap)
-        del p
-
-        return result
-
-    def setCollisions(self, colldata):
-        """
-        Sets the collision data for this tile
-        """
-        self.collData = tuple(colldata)
-        self.updateCollisionOverlay()
-
-    def setQuestionCollisions(self):
-        """
-        Sets the collision data to that of a question block
-        """
-        self.setCollisions((0,0,0,5,0,0,0,0))
-
-    def setBrickCollisions(self):
-        """
-        Sets the collision data to that of a brick block
-        """
-        self.setCollisions((0,0,0,0x10,0,0,0,0))
-
-    def updateCollisionOverlay(self):
-        """
-        Updates the collisions overlay for this pixmap
-        """
-        # This is completely stolen from Puzzle. Only minor
-        # changes have been made. Thanks, Treeki!
-        CD = self.collData
-        if CD[2] & 16:      # Red
-            color = QtGui.QColor(255, 0, 0, 120)
-        elif CD[5] == 1:    # Ice
-            color = QtGui.QColor(0, 0, 255, 120)
-        elif CD[5] == 2:    # Snow
-            color = QtGui.QColor(0, 0, 255, 120)
-        elif CD[5] == 3:    # Quicksand
-            color = QtGui.QColor(128,64,0, 120)
-        elif CD[5] == 4:    # Conveyor
-            color = QtGui.QColor(128,128,128, 120)
-        elif CD[5] == 5:    # Conveyor
-            color = QtGui.QColor(128,128,128, 120)
-        elif CD[5] == 6:    # Rope
-            color = QtGui.QColor(128,0,255, 120)
-        elif CD[5] == 7:    # Half Spike
-            color = QtGui.QColor(128,0,255, 120)
-        elif CD[5] == 8:    # Ledge
-            color = QtGui.QColor(128,0,255, 120)
-        elif CD[5] == 9:    # Ladder
-            color = QtGui.QColor(128,0,255, 120)
-        elif CD[5] == 10:   # Staircase
-            color = QtGui.QColor(255, 0, 0, 120)
-        elif CD[5] == 11:   # Carpet
-            color = QtGui.QColor(255, 0, 0, 120)
-        elif CD[5] == 12:   # Dust
-            color = QtGui.QColor(128,64,0, 120)
-        elif CD[5] == 13:   # Grass
-            color = QtGui.QColor(0, 255, 0, 120)
-        elif CD[5] == 14:   # Unknown
-            color = QtGui.QColor(255, 0, 0, 120)
-        elif CD[5] == 15:   # Beach Sand
-            color = QtGui.QColor(128, 64, 0, 120)
-        else:               # Brown?
-            color = QtGui.QColor(64, 30, 0, 120)
-
-
-        # Sets Brush style for fills
-        if CD[2] & 4:        # Climbing Grid
-            style = Qt.DiagCrossPattern
-        elif (CD[3] & 16) or (CD[3] & 4) or (CD[3] & 8): # Breakable
-            style = Qt.Dense5Pattern
-        else:
-            style = Qt.SolidPattern
-
-        brush = QtGui.QBrush(color, style)
-        pen = QtGui.QPen(QtGui.QColor(0,0,0,128))
-        collPix = QtGui.QPixmap(TileWidth, TileWidth)
-        collPix.fill(QtGui.QColor(0,0,0,0))
-        painter = QtGui.QPainter(collPix)
-        painter.setBrush(brush)
-        painter.setPen(pen)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
-
-        # Paints shape based on other stuff
-        if CD[3] & 32: # Slope
-            if CD[7] == 0:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, TileWidth),
-                                                    QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(TileWidth, 0)]))
-            elif CD[7] == 1:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(0, TileWidth)]))
-            elif CD[7] == 2:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, TileWidth),
-                                                    QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 2)]))
-            elif CD[7] == 3:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, TileWidth),
-                                                    QtCore.QPoint(0, TileWidth // 2),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth)]))
-            elif CD[7] == 4:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, TileWidth),
-                                                    QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 2),
-                                                    QtCore.QPoint(TileWidth, TileWidth)]))
-            elif CD[7] == 5:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, TileWidth // 2),
-                                                    QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(0, TileWidth)]))
-            elif CD[7] == 10:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(0, TileWidth),
-                                                    QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(TileWidth, 0)]))
-            elif CD[7] == 11:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, TileWidth),
-                                                    QtCore.QPoint(TileWidth, TileWidth * 3 // 4),
-                                                    QtCore.QPoint(TileWidth, TileWidth)]))
-            elif CD[7] == 12:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 2),
-                                                    QtCore.QPoint(0, TileWidth * 3 // 4),
-                                                    QtCore.QPoint(0, TileWidth)]))
-            elif CD[7] == 13:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 4),
-                                                    QtCore.QPoint(0, TileWidth // 2),
-                                                    QtCore.QPoint(0, TileWidth)]))
-            elif CD[7] == 14:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(0, TileWidth // 4),
-                                                    QtCore.QPoint(0, TileWidth)]))
-            elif CD[7] == 15:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 4),
-                                                    QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(0, TileWidth)]))
-            elif CD[7] == 16:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 2),
-                                                    QtCore.QPoint(0, TileWidth // 4),
-                                                    QtCore.QPoint(0, TileWidth)]))
-            elif CD[7] == 17:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(TileWidth, TileWidth * 3 // 4),
-                                                    QtCore.QPoint(0, TileWidth // 2),
-                                                    QtCore.QPoint(0, TileWidth)]))
-            elif CD[7] == 18:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(0, TileWidth * 3 // 4),
-                                                    QtCore.QPoint(0, TileWidth)]))
-
-        elif CD[3] & 64: # Reverse Slope
-            if CD[7] == 0:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(TileWidth, 0)]))
-            elif CD[7] == 1:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, TileWidth),
-                                                    QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, 0)]))
-            elif CD[7] == 2:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 2)]))
-            elif CD[7] == 3:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(0, TileWidth // 2),
-                                                    QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(TileWidth, 0)]))
-            elif CD[7] == 4:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, TileWidth),
-                                                    QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 2)]))
-            elif CD[7] == 5:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, TileWidth // 2),
-                                                    QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, 0)]))
-            elif CD[7] == 10:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(0, TileWidth),
-                                                    QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(TileWidth, 0)]))
-            elif CD[7] == 11:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 4)]))
-            elif CD[7] == 12:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 2),
-                                                    QtCore.QPoint(0, TileWidth // 4)]))
-            elif CD[7] == 13:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth * 3 // 4),
-                                                    QtCore.QPoint(0, TileWidth // 2)]))
-            elif CD[7] == 14:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(0, TileWidth * 3 // 4)]))
-            elif CD[7] == 15:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth * 3 // 4),
-                                                    QtCore.QPoint(0, TileWidth)]))
-            elif CD[7] == 16:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 2),
-                                                    QtCore.QPoint(0, TileWidth * 3 // 4)]))
-            elif CD[7] == 17:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 4),
-                                                    QtCore.QPoint(0, TileWidth // 2)]))
-            elif CD[7] == TileWidth * 3 // 4:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(0, TileWidth // 4)]))
-
-        elif CD[2] & 8: # Partial
-            if CD[7] == 1:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth // 2, 0),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth // 2),
-                                                    QtCore.QPoint(0, TileWidth // 2)]))
-            elif CD[7] == 2:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth // 2, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 2),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth // 2)]))
-            elif CD[7] == 3:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 2),
-                                                    QtCore.QPoint(0, TileWidth // 2)]))
-            elif CD[7] == 4:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, TileWidth // 2),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth // 2),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth),
-                                                    QtCore.QPoint(0, TileWidth)]))
-            elif CD[7] == 5:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth // 2, 0),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth),
-                                                    QtCore.QPoint(0, TileWidth)]))
-            elif CD[7] == 6:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, TileWidth),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth),
-                                                    QtCore.QPoint(TileWidth // 2, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 2),
-                                                    QtCore.QPoint(0, TileWidth // 2)]))
-            elif CD[7] == 7:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 2),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth // 2),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth),
-                                                    QtCore.QPoint(0, TileWidth)]))
-            elif CD[7] == 8:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth // 2, TileWidth // 2),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 2),
-                                                    QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth)]))
-            elif CD[7] == 9:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 2),
-                                                    QtCore.QPoint(0, TileWidth // 2),
-                                                    QtCore.QPoint(0, TileWidth),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth),
-                                                    QtCore.QPoint(TileWidth // 2, 0)]))
-            elif CD[7] == 10:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth // 2, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth)]))
-            elif CD[7] == 11:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth // 2),
-                                                    QtCore.QPoint(0, TileWidth // 2)]))
-            elif CD[7] == 12:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, TileWidth // 2),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 2),
-                                                    QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(0, TileWidth)]))
-            elif CD[7] == 13:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth // 2, 0),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth // 2),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 2),
-                                                    QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(0, TileWidth)]))
-            elif CD[7] == 14:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth // 2, 0),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth // 2),
-                                                    QtCore.QPoint(0, TileWidth // 2),
-                                                    QtCore.QPoint(0, TileWidth)]))
-            elif CD[7] == 15:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(0, TileWidth)]))
-
-        elif CD[2] & 0x20: # Solid-on-bottom
-            painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, TileWidth),
-                                                QtCore.QPoint(TileWidth, TileWidth),
-                                                QtCore.QPoint(TileWidth, TileWidth * 3 // 4),
-                                                QtCore.QPoint(0, TileWidth * 3 // 4)]))
-
-            painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth * 0.625, 0),
-                                                QtCore.QPoint(TileWidth * 0.625, TileWidth // 2),
-                                                QtCore.QPoint(TileWidth * 3 // 4, TileWidth // 2),
-                                                QtCore.QPoint(TileWidth // 2, 17),
-                                                QtCore.QPoint(TileWidth // 4, TileWidth // 2),
-                                                QtCore.QPoint(TileWidth * 0.125, TileWidth // 2),
-                                                QtCore.QPoint(TileWidth * 0.125, 0)]))
-
-        elif CD[2] & 0x80: # Solid-on-top
-            painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                QtCore.QPoint(TileWidth, 0),
-                                                QtCore.QPoint(TileWidth, TileWidth // 4),
-                                                QtCore.QPoint(0, TileWidth // 4)]))
-
-            painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth * 0.875, TileWidth),
-                                                QtCore.QPoint(TileWidth * 0.875, TileWidth // 2),
-                                                QtCore.QPoint(TileWidth * 3 // 4, TileWidth // 2),
-                                                QtCore.QPoint(TileWidth // 2, 7),
-                                                QtCore.QPoint(TileWidth // 4, TileWidth // 2),
-                                                QtCore.QPoint(TileWidth * 0.375, TileWidth // 2),
-                                                QtCore.QPoint(TileWidth * 0.375, TileWidth)]))
-
-        elif CD[2] & 16: # Spikes
-            if CD[7] == 0:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 2),
-                                                    QtCore.QPoint(0, TileWidth // 4)]))
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth, TileWidth // 2),
-                                                    QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(0, TileWidth * 3 // 4)]))
-            if CD[7] == 1:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(0, TileWidth // 2),
-                                                    QtCore.QPoint(TileWidth, TileWidth // 4)]))
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, TileWidth // 2),
-                                                    QtCore.QPoint(0, TileWidth),
-                                                    QtCore.QPoint(TileWidth, TileWidth * 3 // 4)]))
-            if CD[7] == 2:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, TileWidth),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth),
-                                                    QtCore.QPoint(TileWidth // 4, 0)]))
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth // 2, TileWidth),
-                                                    QtCore.QPoint(TileWidth, TileWidth),
-                                                    QtCore.QPoint(TileWidth * 3 // 4, 0)]))
-            if CD[7] == 3:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth // 2, 0),
-                                                    QtCore.QPoint(TileWidth // 4, TileWidth)]))
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth // 2, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth * 3 // 4, TileWidth)]))
-            if CD[7] == 4:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth * 3 // 4, TileWidth),
-                                                    QtCore.QPoint(TileWidth // 4, TileWidth)]))
-            if CD[7] == 5:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(TileWidth // 4, 0),
-                                                    QtCore.QPoint(TileWidth * 3 // 4, 0),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth)]))
-            if CD[7] == 6:
-                painter.drawPolygon(QtGui.QPolygon([QtCore.QPoint(0, 0),
-                                                    QtCore.QPoint(TileWidth, 0),
-                                                    QtCore.QPoint(TileWidth // 2, TileWidth)]))
-
-##        elif CD[3] & 4: # QBlock
-##            if CD[7] == 0:
-##                painter.drawPixmap(option.rect, QtGui.QPixmap(path + 'QBlock/FireF.png'))
-##            if CD[7] == 1:
-##                painter.drawPixmap(option.rect, QtGui.QPixmap(path + 'QBlock/Star.png'))
-##            if CD[7] == 2:
-##                painter.drawPixmap(option.rect, QtGui.QPixmap(path + 'QBlock/Coin.png'))
-##            if CD[7] == 3:
-##                painter.drawPixmap(option.rect, QtGui.QPixmap(path + 'QBlock/Vine.png'))
-##            if CD[7] == 4:
-##                painter.drawPixmap(option.rect, QtGui.QPixmap(path + 'QBlock/1up.png'))
-##            if CD[7] == 5:
-##                painter.drawPixmap(option.rect, QtGui.QPixmap(path + 'QBlock/Mini.png'))
-##            if CD[7] == 6:
-##                painter.drawPixmap(option.rect, QtGui.QPixmap(path + 'QBlock/Prop.png'))
-##            if CD[7] == 7:
-##                painter.drawPixmap(option.rect, QtGui.QPixmap(path + 'QBlock/Peng.png'))
-##            if CD[7] == 8:
-##                painter.drawPixmap(option.rect, QtGui.QPixmap(path + 'QBlock/IceF.png'))
-##
-##        elif CD[3] & 2: # Coin
-##            if CD[7] == 0:
-##                painter.drawPixmap(option.rect, QtGui.QPixmap(path + 'Coin/Coin.png'))
-##            if CD[7] == 4:
-##                painter.drawPixmap(option.rect, QtGui.QPixmap(path + 'Coin/POW.png'))
-##
-##        elif CD[3] & 8: # Exploder
-##            if CD[7] == 1:
-##                painter.drawPixmap(option.rect, QtGui.QPixmap(path + 'Explode/Stone.png'))
-##            if CD[7] == 2:
-##                painter.drawPixmap(option.rect, QtGui.QPixmap(path + 'Explode/Wood.png'))
-##            if CD[7] == 3:
-##                painter.drawPixmap(option.rect, QtGui.QPixmap(path + 'Explode/Red.png'))
-##
-##        elif CD[1] & 2: # Falling
-##            painter.drawPixmap(option.rect, QtGui.QPixmap(path + 'Prop/Fall.png'))
-
-#                elif CD[5] == 4 or 5: # Conveyor
-#                    d
-
-        elif (CD[3] & 1) or (CD[3] in (5, 0x10)) or (CD[3] & 4) or (CD[3] & 8): # Solid, question or brick
-            painter.drawRect(0, 0, TileWidth, TileWidth)
-
-        else: # No fill
-            pass
-
-        self.collOverlay = collPix
-
-
-    def addOverlay(self, overlayTile):
-        """
-        Adds a 3D overlay tile
-        """
-        if overlayTile is not None:
-            overlayPix = overlayTile.main
-
-            # Create a depth map
-            self.depthMap = QtGui.QPixmap(TileWidth, TileWidth)
-            self.depthMap.fill(theme.color('depth_highlight'))
-            p2 = QtGui.QPainter(self.depthMap)
-            p2.setCompositionMode(p2.CompositionMode_DestinationIn)
-            p2.drawPixmap(0, 0, overlayPix)
-            p2.end; del p2
-
-            # Known bug: if the depth_highlight color is
-            # fully opaque, things can get messed up.
-
-            # Overlay the overlay tile onto self.main
-            p1 = QtGui.QPainter(self.main)
-            p1.drawPixmap(0, 0, overlayPix)
-            p1.end; del p1
-
-
-def RenderObject(tileset, objnum, width, height, fullslope=False):
-    """
-    Render a tileset object into an array
-    """
-    # allocate an array
-    dest = []
-    for i in range(height): dest.append([0]*width)
-
-    # ignore non-existent objects
-    try:
-        tileset_defs = ObjectDefinitions[tileset]
-    except IndexError:
-        tileset_defs = None
-    if tileset_defs is None: return dest
-    try:
-        obj = tileset_defs[objnum]
-    except IndexError:
-        obj = None
-    if obj is None: return dest
-    if len(obj.rows) == 0: return dest
-
-    # diagonal objects are rendered differently
-    if (obj.rows[0][0][0] & 0x80) != 0:
-        RenderDiagonalObject(dest, obj, width, height, fullslope)
-    else:
-        # standard object
-        repeatFound = False
-        beforeRepeat = []
-        inRepeat = []
-        afterRepeat = []
-
-        for row in obj.rows:
-            if len(row) == 0: continue
-            # row[0][0] is 0, 1, 2, 4
-            if (row[0][0] & 2) != 0 or (row[0][0] & 4) != 0:
-                repeatFound = True
-                inRepeat.append(row)
-            else:
-                if repeatFound:
-                    afterRepeat.append(row)
-                else:
-                    beforeRepeat.append(row)
-
-        bc = len(beforeRepeat); ic = len(inRepeat); ac = len(afterRepeat)
-        if ic == 0:
-            for y in range(height):
-                RenderStandardRow(dest[y], beforeRepeat[y % bc], y, width)
-        else:
-            afterthreshold = height - ac - 1
-            for y in range(height):
-                if y < bc:
-                    RenderStandardRow(dest[y], beforeRepeat[y], y, width)
-                elif y > afterthreshold:
-                    RenderStandardRow(dest[y], afterRepeat[y - height + ac], y, width)
-                else:
-                    RenderStandardRow(dest[y], inRepeat[(y - bc) % ic], y, width)
-
-    return dest
-
-
-def RenderStandardRow(dest, row, y, width):
-    """
-    Render a row from an object
-    """
-    repeatFound = False
-    beforeRepeat = []
-    inRepeat = []
-    afterRepeat = []
-
-    for tile in row:
-        # NSMBU introduces two (?) new ways to define horizontal tiling, IN ADDITION TO the original one
-        tiling = False
-        tiling = tiling or ((tile[2] & 1) != 0 and (tile[0] & 1) != 0) # NSMBW-style (still applies to NSMBU)
-        tiling = tiling or ((row[0][0] & 4) != 0 and (tile[0] & 4) == 0) # NSMBU-style (J_Kihon BG rocks)
-        tiling = tiling or ((tile[0] & 1) != 0) # NSMBU-style (horizontal pipes)
-
-        if tiling:
-            repeatFound = True
-            inRepeat.append(tile)
-        else:
-            if repeatFound:
-                afterRepeat.append(tile)
-            else:
-                beforeRepeat.append(tile)
-
-    bc = len(beforeRepeat); ic = len(inRepeat); ac = len(afterRepeat)
-    if ic == 0:
-        for x in range(width):
-            dest[x] = beforeRepeat[x % bc][1]
-    else:
-        afterthreshold = width - ac - 1
-        for x in range(width):
-            if x < bc:
-                dest[x] = beforeRepeat[x][1]
-            elif x > afterthreshold:
-                dest[x] = afterRepeat[x - width + ac][1]
-            else:
-                dest[x] = inRepeat[(x - bc) % ic][1]
-
-
-def RenderDiagonalObject(dest, obj, width, height, fullslope):
-    """
-    Render a diagonal object
-    """
-    # set all to empty tiles
-    for row in dest:
-        for x in range(width):
-            row[x] = -1
-
-    # get sections
-    mainBlock,subBlock = GetSlopeSections(obj)
-    cbyte = obj.rows[0][0][0]
-
-    # get direction
-    goLeft = ((cbyte & 1) != 0)
-    goDown = ((cbyte & 2) != 0)
-
-    # base the amount to draw by seeing how much we can fit in each direction
-    if fullslope:
-        drawAmount = max(height // len(mainBlock), width // len(mainBlock[0]))
-    else:
-        drawAmount = min(height // len(mainBlock), width // len(mainBlock[0]))
-
-    # if it's not goingLeft and not goingDown:
-    if not goLeft and not goDown:
-        # slope going from SW => NE
-        # start off at the bottom left
-        x = 0
-        y = height - len(mainBlock) - (0 if subBlock is None else len(subBlock))
-        xi = len(mainBlock[0])
-        yi = -len(mainBlock)
-
-    # ... and if it's goingLeft and not goingDown:
-    elif goLeft and not goDown:
-        # slope going from SE => NW
-        # start off at the top left
-        x = 0
-        y = 0
-        xi = len(mainBlock[0])
-        yi = len(mainBlock)
-
-    # ... and if it's not goingLeft but it's goingDown:
-    elif not goLeft and goDown:
-        # slope going from NW => SE
-        # start off at the top left
-        x = 0
-        y = (0 if subBlock is None else len(subBlock))
-        xi = len(mainBlock[0])
-        yi = len(mainBlock)
-
-    # ... and finally, if it's goingLeft and goingDown:
-    else:
-        # slope going from SW => NE
-        # start off at the bottom left
-        x = 0
-        y = height - len(mainBlock)
-        xi = len(mainBlock[0])
-        yi = -len(mainBlock)
-
-
-    # finally draw it
-    for i in range(drawAmount):
-        PutObjectArray(dest, x, y, mainBlock, width, height)
-        if subBlock is not None:
-            xb = x
-            if goLeft: xb = x + len(mainBlock[0]) - len(subBlock[0])
-            if goDown:
-                PutObjectArray(dest, xb, y - len(subBlock), subBlock, width, height)
-            else:
-                PutObjectArray(dest, xb, y + len(mainBlock), subBlock, width, height)
-        x += xi
-        y += yi
-
-
-def PutObjectArray(dest, xo, yo, block, width, height):
-    """
-    Places a tile array into an object
-    """
-    #for y in range(yo,min(yo+len(block),height)):
-    for y in range(yo,yo+len(block)):
-        if y < 0: continue
-        if y >= height: continue
-        drow = dest[y]
-        srow = block[y-yo]
-        #for x in range(xo,min(xo+len(srow),width)):
-        for x in range(xo,xo+len(srow)):
-            if x < 0: continue
-            if x >= width: continue
-            drow[x] = srow[x-xo][1]
-
-
-def GetSlopeSections(obj):
-    """
-    Sorts the slope data into sections
-    """
-    sections = []
-    currentSection = None
-
-    for row in obj.rows:
-        if len(row) > 0 and (row[0][0] & 0x80) != 0: # begin new section
-            if currentSection is not None:
-                sections.append(CreateSection(currentSection))
-            currentSection = []
-        currentSection.append(row)
-
-    if currentSection is not None: # end last section
-        sections.append(CreateSection(currentSection))
-
-    if len(sections) == 1:
-        return (sections[0],None)
-    else:
-        return (sections[0],sections[1])
-
-
-def CreateSection(rows):
-    """
-    Create a slope section
-    """
-    # calculate width
-    width = 0
-    for row in rows:
-        thiswidth = CountTiles(row)
-        if width < thiswidth: width = thiswidth
-
-    # create the section
-    section = []
-    for row in rows:
-        drow = [0] * width
-        x = 0
-        for tile in row:
-            if (tile[0] & 0x80) == 0:
-                drow[x] = tile
-                x += 1
-        section.append(drow)
-
-    return section
-
-
-def CountTiles(row):
-    """
-    Counts the amount of real tiles in an object row
-    """
-    res = 0
-    for tile in row:
-        if (tile[0] & 0x80) == 0:
-            res += 1
-    return res
-
-
-def CreateTilesets():
-    """
-    Blank out the tileset arrays
-    """
-    global Tiles, TilesetFilesLoaded, TilesetAnimTimer, TileBehaviours, ObjectDefinitions
-
-    Tiles = [None]*0x200*4
-    Tiles += Overrides
-    TilesetFilesLoaded = [None, None, None, None]
-    #TileBehaviours = [0]*1024
-    TilesetAnimTimer = QtCore.QTimer()
-    TilesetAnimTimer.timeout.connect(IncrementTilesetFrame)
-    TilesetAnimTimer.start(180)
-    ObjectDefinitions = [None]*4
-    SLib.Tiles = Tiles
-
-
-def LoadTileset(idx, name, reload=False):
-    try:
-        return _LoadTileset(idx, name, reload)
-    except Exception:
-        raise
-        QtWidgets.QMessageBox.warning(None, trans.string('Err_CorruptedTileset', 0), trans.string('Err_CorruptedTileset', 1, '[file]', name))
-        return False
-
-
-class StoppableThread(threading.Thread):
-    """
-    Thread class with a stop() method. The thread itself has to check
-    regularly for the stopped() condition.
-    http://stackoverflow.com/a/325528
-    """
-
-    def __init__(self):
-        super(StoppableThread, self).__init__()
-        self._stop_event = threading.Event()
-
-    def stop(self):
-        self._stop_event.set()
-
-    def stopped(self):
-        return self._stop_event.isSet()
-
-
-class ProgressiveTilesetRenderingThread(StoppableThread):
-    """
-    Thread that renders tilesets progressively.
-    It's a StoppableThread which allows the operation
-    to be killed (say, when the user opens a new level
-    before the current level's tilesets are finished
-    rendering).
-    """
-    @staticmethod
-    def getTileFromImage(tilemap, xtilenum, ytilenum):
-        return tilemap.copy((xtilenum * 64) + 2, (ytilenum * 64) + 2, 60, 60)
-
-    def setStuff(self, comptiledata, tilesetIdx, tileoffset, name):
-        """
-        Sets settings that the thread will use
-        """
-        self.comptiledata = comptiledata
-        self.tilesetIdx = tilesetIdx
-        self.tileoffset = tileoffset
-        self.tilesetname = name
-        self.name = name # thread name
-
-    def run(self):
-        """
-        Renders tilesets progressively.
-        """
-        TilesetCompletelyCached[self.tilesetname] = False
-
-        for image in gtx.renderGTX(gtx.loadGTX(self.comptiledata)):
-
-            if self.stopped(): return
-
-            pix = QtGui.QPixmap.fromImage(image)
-            sourcex = 0
-            sourcey = 0
-            for i in range(self.tileoffset, self.tileoffset + 256):
-                if Tiles[i] is not None:
-                    Tiles[i].setMain(self.getTileFromImage(pix, sourcex, sourcey))
-                sourcex += 1
-                if sourcex >= 32:
-                    sourcex = 0
-                    sourcey += 1
-
-            mainWindow.scene.update()
-            mainWindow.objPicker.LoadFromTilesets()
-
-            if self.stopped(): return
-
-        ProcessOverrides(self.tilesetIdx, self.tilesetname)
-
-        TilesetCompletelyCached[self.tilesetname] = True
-
-
-def _LoadTileset(idx, name, reload=False):
-    """
-    Load in a tileset into a specific slot
-    """
-
-    # # find the tileset path
-    # global arcname
-    # TilesetPaths = reversed(gamedef.GetGamePaths())
-
-    # found = False
-    # for path in TilesetPaths:
-    #     if path is None: break
-
-    #     arcname = path + '/Unit/' + name + '.sarc'
-    #     compressed = False
-    #     if os.path.isfile(arcname):
-    #         found = True
-    #         break
-    #     arcname += '.lh'
-    #     compressed = True
-    #     if os.path.isfile(arcname):
-    #         found = True
-    #         break
-
-    # # warning if not found
-    # if not found:
-    #     QtWidgets.QMessageBox.warning(None, trans.string('Err_MissingTileset', 0), trans.string('Err_MissingTileset', 1, '[file]', name))
-    #     return False
-
-    # if this file's already loaded, return
-    if TilesetFilesLoaded[idx] == name and not reload: return
-
-    # get the data
-    # with open(arcname, 'rb') as fileobj:
-    #     arcdata = fileobj.read()
-    # if compressed:
-    #     arcdata = LHTool.decompressLH(arcdata)
-    if name not in szsData: return
-    arcdata = szsData[name]
-    arc = SarcLib.SARC_Archive()
-    arc.load(arcdata)
-
-    tileoffset = idx * 256
-
-    global Tiles, TilesetCache, TileThreads
-    if name not in TilesetCache or not TilesetCompletelyCached[name]:
-        # Load the tiles because they're not cached.
-
-        # Decompress the textures
-        try:
-            comptiledata = arc['BG_tex/%s.gtx' % name].data
-            colldata = arc['BG_chk/d_bgchk_%s.bin' % name].data
-        except KeyError:
-            QtWidgets.QMessageBox.warning(None, trans.string('Err_CorruptedTilesetData', 0), trans.string('Err_CorruptedTilesetData', 1, '[file]', name))
-            return False
-
-        # Prepare the TilesetTiles
-        for i in range(tileoffset, tileoffset + 256):
-            Tiles[i] = TilesetTile(QtGui.QPixmap())
-
-        # Run the progressive tileset rendering thread for this tileset
-        if TileThreads[idx] is not None:
-            TileThreads[idx].stop()
-        TileThreads[idx] = ProgressiveTilesetRenderingThread()
-        TileThreads[idx].setStuff(comptiledata, idx, tileoffset, name)
-        TileThreads[idx].start()
-
-        # # Add overlays
-        # overlayfile = arc['BG_unt/%s_add.bin' % name].data
-        # overlayArray = struct.unpack('>441H', overlayfile[:882])
-        # i = idx * 0x200
-        # arrayi = 0
-        # for y in range(21):
-        #     for x in range(21):
-        #         if Tiles[i] is not None:
-        #             Tiles[i].addOverlay(Tiles[overlayArray[arrayi]])
-        #         i += 1; arrayi += 1
-
-        # Load the tileset animations, if there are any
-        #isAnimated, prefix = CheckTilesetAnimated(arc)
-        isAnimated = False
-        if isAnimated:
-            row = 0
-            col = 0
-            for i in range(tileoffset,tileoffset+441):
-                filenames = []
-                filenames.append('%s_%d%s%s.bin' % (prefix, idx, hex(row)[2].lower(), hex(col)[2].lower()))
-                filenames.append('%s_%d%s%s.bin' % (prefix, idx, hex(row)[2].upper(), hex(col)[2].upper()))
-                if filenames[0] == filenames[1]:
-                    item = filenames[0]
-                    filenames = []
-                    filenames.append(item)
-                for fn in filenames:
-                    fn = 'BG_tex/' + fn
-                    found = False
-                    try:
-                        arc[fn]
-                        found = True
-                    except KeyError:
-                        pass
-                    if found:
-                        Tiles[i].addAnimationData(arc[fn])
-                col += 1
-                if col == 16:
-                    col = 0
-                    row += 1
-
-    else:
-        # We already have tiles in the tileset cache; copy them over to Tiles
-        for i in range(256):
-            Tiles[i + tileoffset] = TilesetCache[name][i]
-
-
-    # Load the object definitions
-    defs = [None] * 256
-
-    indexfile = arc['BG_unt/%s_hd.bin' % name].data
-    deffile = arc['BG_unt/%s.bin' % name].data
-    objcount = len(indexfile) // 6
-    indexstruct = struct.Struct('>HBBH')
-
-    for i in range(objcount):
-        data = indexstruct.unpack_from(indexfile, i * 6)
-        obj = ObjectDef()
-        obj.width = data[1]
-        obj.height = data[2]
-        obj.load(deffile, data[0], tileoffset)
-        defs[i] = obj
-
-    ObjectDefinitions[idx] = defs
-
-    # Keep track of this filepath
-    TilesetFilesLoaded[idx] = name
-
-    # Add Tiles to spritelib
-    SLib.Tiles = Tiles
-
-    # Add Tiles to the cache, but not for NSMBU Pa1/2/3 since that doesn't make any sense
-    if mainWindow.CurrentGame != NewSuperMarioBrosU:
-        TilesetCache[name] = []
-        for i in range(256):
-            TilesetCache[name].append(Tiles[i + tileoffset])
-
-
-def LoadTexture(tiledata):
-    with open('texturipper/texture.ctpk', 'wb') as binfile:
-        binfile.write(tiledata)
-
-    if AutoOpenScriptEnabled: return QtGui.QImage(512, 512, QtGui.QImage.Format_ARGB32)
-
-    with subprocess.Popen('texturipper/texturipper_1.2.exe texture.ctpk', cwd='texturipper') as proc:
-        pass
-
-    pngname = None
-    for filename in os.listdir('texturipper'):
-        if filename.endswith('.png'):
-            pngname = filename
-    if not pngname: raise Exception
-
-    with open(os.path.join('texturipper', pngname), 'rb') as pngfile:
-        img = QtGui.QImage(os.path.join('texturipper', pngname))
-
-    for filename in os.listdir('texturipper'):
-        if filename == 'texturipper_1.2.exe': continue
-        os.remove(os.path.join('texturipper', filename))
-
-    return img
-
-
-def IncrementTilesetFrame():
-    """
-    Moves each tileset to the next frame
-    """
-    if not TilesetsAnimating: return
-    for tile in Tiles:
-        if tile is not None: tile.nextFrame()
-    mainWindow.scene.update()
-    mainWindow.objPicker.update()
-
-
-def CheckTilesetAnimated(tileset):
-    """Checks if a tileset contains Newer-style animations, and if so, returns
-    (True, prefix) where prefix is the animation prefix. If not, (False, None).
-    tileset should be a Wii.py U8 object."""
-    # Find the animation files, if any
-    excludes = (
-        'block_anime.bin',
-        'hatena_anime.bin',
-        'tuka_coin_anime.bin',
-        )
-    texFiles = tileset['BG_tex']
-    animFiles = []
-    for f in texFiles:
-        # Determine if it's likely an animation file
-        if f.lower() in excludes: continue
-        if f[-4:].lower() != '.bin': continue
-        namelen = len(f)
-        if namelen == 9:
-            if f[1] != '_': continue
-            if f[2] not in '0123': continue
-            if f[3].lower() not in '0123456789abcdef': continue
-            if f[4].lower() not in '0123456789abcdef': continue
-        elif namelen == 10:
-            if f[2] != '_': continue
-            if f[3] not in '0123': continue
-            if f[4].lower() not in '0123456789abcdef': continue
-            if f[5].lower() not in '0123456789abcdef': continue
-        animFiles.append(f)
-
-    # Quit if there's no animation
-    if len(animFiles) == 0: return False, None
-    else:
-        # This makes so many assumptions
-        fn = animFiles[0]
-        prefix = fn[0] if len(fn) == 9 else fn[:2]
-        return True, prefix
-
-
-
-def UnloadTileset(idx):
-    """
-    Unload the tileset from a specific slot
-    """
-    for i in range(idx * 0x200, idx * 0x200 + 0x200):
-        Tiles[i] = None
-
-    ObjectDefinitions[idx] = None
-    TilesetFilesLoaded[idx] = None
-
-
-def ProcessOverrides(idx, name):
-    """
-    Load overridden tiles if there are any
-    """
-
-    try:
-        tsindexes = ['J_Kihon', 'J_Chika', 'J_Setsugen', 'J_Yougan', 'J_Gold', 'J_Suichu']
-        if name in tsindexes:
-            offset = (0x200 * 4) + (tsindexes.index(name) * 64)
-            # Setsugen/Snow is unused for some reason? but we still override it
-
-            defs = ObjectDefinitions[idx]
-            t = Tiles
-
-            # Invisible blocks
-            # these are all the same so let's just load them from the first row
-            replace = 0x200 * 4
-            for i in [3, 4, 5, 6, 7, 8, 9, 10]:
-                t[i].main = t[replace].main
-                replace += 1
-
-            # Question and brick blocks
-            # these don't have their own tiles so we have to do them by objects
-            replace = offset + 9
-            for i in range(30, 41):
-                defs[i].rows[0][0] = (0, replace, 0)
-                replace += 1
-            for i in range(16, 30):
-                defs[i].rows[0][0] = (0, replace, 0)
-                replace += 1
-
-            # now the extra stuff (invisible collisions etc)
-            replace = 0x200 * 4 + 64 * 4
-            for i in [0, 1, 11, 14, 2, 13, 12]:
-                t[i].main = t[replace].main
-                replace += 1
-            replace = 0x200 * 4 + 64 * 5
-            for i in [190, 191, 192]:
-                t[i].main = t[replace].main
-                replace += 1
-            # t[1].main = t[1280].main # solid
-            # t[2].main = t[1311].main # vine stopper
-            # t[11].main = t[1310].main # jumpthrough platform
-            # t[12].main = t[1309].main # 16x8 roof platform
-
-            # t[16].main = t[1291].main # 1x1 slope going up
-            # t[17].main = t[1292].main # 1x1 slope going down
-            # t[18].main = t[1281].main # 2x1 slope going up (part 1)
-            # t[19].main = t[1282].main # 2x1 slope going up (part 2)
-            # t[20].main = t[1283].main # 2x1 slope going down (part 1)
-            # t[21].main = t[1284].main # 2x1 slope going down (part 2)
-            # t[22].main = t[1301].main # 4x1 slope going up (part 1)
-            # t[23].main = t[1302].main # 4x1 slope going up (part 2)
-            # t[24].main = t[1303].main # 4x1 slope going up (part 3)
-            # t[25].main = t[1304].main # 4x1 slope going up (part 4)
-            # t[26].main = t[1305].main # 4x1 slope going down (part 1)
-            # t[27].main = t[1306].main # 4x1 slope going down (part 2)
-            # t[28].main = t[1307].main # 4x1 slope going down (part 3)
-            # t[29].main = t[1308].main # 4x1 slope going down (part 4)
-            # t[30].main = t[1062].main # coin
-
-            # t[32].main = t[1289].main # 1x1 roof going down
-            # t[33].main = t[1290].main # 1x1 roof going up
-            # t[34].main = t[1285].main # 2x1 roof going down (part 1)
-            # t[35].main = t[1286].main # 2x1 roof going down (part 2)
-            # t[36].main = t[1287].main # 2x1 roof going up (part 1)
-            # t[37].main = t[1288].main # 2x1 roof going up (part 2)
-            # t[38].main = t[1293].main # 4x1 roof going down (part 1)
-            # t[39].main = t[1294].main # 4x1 roof going down (part 2)
-            # t[40].main = t[1295].main # 4x1 roof going down (part 3)
-            # t[41].main = t[1296].main # 4x1 roof going down (part 4)
-            # t[42].main = t[1297].main # 4x1 roof going up (part 1)
-            # t[43].main = t[1298].main # 4x1 roof going up (part 2)
-            # t[44].main = t[1299].main # 4x1 roof going up (part 3)
-            # t[45].main = t[1300].main # 4x1 roof going up (part 4)
-            # t[46].main = t[1312].main # P-switch coins
-
-            # t[53].main = t[1314].main # donut lift
-            # t[61].main = t[1063].main # multiplayer coin
-            # t[63].main = t[1313].main # instant death tile
-
-        elif name == 'Pa1_nohara' or name == 'Pa1_nohara2' or name == 'Pa1_daishizen':
-            # flowers
-            t = Tiles
-            t[416].main = t[1092].main # grass
-            t[417].main = t[1093].main
-            t[418].main = t[1094].main
-            t[419].main = t[1095].main
-            t[420].main = t[1096].main
-
-            if name == 'Pa1_nohara' or name == 'Pa1_nohara2':
-                t[432].main = t[1068].main # flowers
-                t[433].main = t[1069].main # flowers
-                t[434].main = t[1070].main # flowers
-
-                t[448].main = t[1158].main # flowers on grass
-                t[449].main = t[1159].main
-                t[450].main = t[1160].main
-            elif name == 'Pa1_daishizen':
-                # forest flowers
-                t[432].main = t[1071].main # flowers
-                t[433].main = t[1072].main # flowers
-                t[434].main = t[1073].main # flowers
-
-                t[448].main = t[1222].main # flowers on grass
-                t[449].main = t[1223].main
-                t[450].main = t[1224].main
-
-        elif name == 'Pa3_rail' or name == 'Pa3_rail_white' or name == 'Pa3_daishizen':
-            # These are the line guides
-            # Pa3_daishizen has less though
-
-            t = Tiles
-
-            t[768].main = t[1088].main # horizontal line
-            t[769].main = t[1089].main # vertical line
-            t[770].main = t[1090].main # bottomright corner
-            t[771].main = t[1091].main # topleft corner
-
-            t[784].main = t[1152].main # left red blob (part 1)
-            t[785].main = t[1153].main # top red blob (part 1)
-            t[786].main = t[1154].main # top red blob (part 2)
-            t[787].main = t[1155].main # right red blob (part 1)
-            t[788].main = t[1156].main # topleft red blob
-            t[789].main = t[1157].main # topright red blob
-
-            t[800].main = t[1216].main # left red blob (part 2)
-            t[801].main = t[1217].main # bottom red blob (part 1)
-            t[802].main = t[1218].main # bottom red blob (part 2)
-            t[803].main = t[1219].main # right red blob (part 2)
-            t[804].main = t[1220].main # bottomleft red blob
-            t[805].main = t[1221].main # bottomright red blob
-
-            # Those are all for Pa3_daishizen
-            if name == 'Pa3_daishizen': return
-
-            t[816].main = t[1056].main # 1x2 diagonal going up (top edge)
-            t[817].main = t[1057].main # 1x2 diagonal going down (top edge)
-
-            t[832].main = t[1120].main # 1x2 diagonal going up (part 1)
-            t[833].main = t[1121].main # 1x2 diagonal going down (part 1)
-            t[834].main = t[1186].main # 1x1 diagonal going up
-            t[835].main = t[1187].main # 1x1 diagonal going down
-            t[836].main = t[1058].main # 2x1 diagonal going up (part 1)
-            t[837].main = t[1059].main # 2x1 diagonal going up (part 2)
-            t[838].main = t[1060].main # 2x1 diagonal going down (part 1)
-            t[839].main = t[1061].main # 2x1 diagonal going down (part 2)
-
-            t[848].main = t[1184].main # 1x2 diagonal going up (part 2)
-            t[849].main = t[1185].main # 1x2 diagonal going down (part 2)
-            t[850].main = t[1250].main # 1x1 diagonal going up
-            t[851].main = t[1251].main # 1x1 diagonal going down
-            t[852].main = t[1122].main # 2x1 diagonal going up (part 1)
-            t[853].main = t[1123].main # 2x1 diagonal going up (part 2)
-            t[854].main = t[1124].main # 2x1 diagonal going down (part 1)
-            t[855].main = t[1125].main # 2x1 diagonal going down (part 2)
-
-            t[866].main = t[1065].main # big circle piece 1st row
-            t[867].main = t[1066].main # big circle piece 1st row
-            t[870].main = t[1189].main # medium circle piece 1st row
-            t[871].main = t[1190].main # medium circle piece 1st row
-
-            t[881].main = t[1128].main # big circle piece 2nd row
-            t[882].main = t[1129].main # big circle piece 2nd row
-            t[883].main = t[1130].main # big circle piece 2nd row
-            t[884].main = t[1131].main # big circle piece 2nd row
-            t[885].main = t[1252].main # medium circle piece 2nd row
-            t[886].main = t[1253].main # medium circle piece 2nd row
-            t[887].main = t[1254].main # medium circle piece 2nd row
-            t[888].main = t[1188].main # small circle
-
-            t[896].main = t[1191].main # big circle piece 3rd row
-            t[897].main = t[1192].main # big circle piece 3rd row
-            t[900].main = t[1195].main # big circle piece 3rd row
-            t[901].main = t[1316].main # medium circle piece 3rd row
-            t[902].main = t[1317].main # medium circle piece 3rd row
-            t[903].main = t[1318].main # medium circle piece 3rd row
-
-            t[912].main = t[1255].main # big circle piece 4th row
-            t[913].main = t[1256].main # big circle piece 4th row
-            t[916].main = t[1259].main # big circle piece 4th row
-
-            t[929].main = t[1320].main # big circle piece 5th row
-            t[930].main = t[1321].main # big circle piece 5th row
-            t[931].main = t[1322].main # big circle piece 5th row
-            t[932].main = t[1323].main # big circle piece 5th row
-
-        elif name == 'Pa3_MG_house_ami_rail':
-            t = Tiles
-
-            t[832].main = t[1088].main # horizontal line
-            t[833].main = t[1090].main # bottomright corner
-            t[834].main = t[1088].main # horizontal line
-
-            t[848].main = t[1089].main # vertical line
-            t[849].main = t[1089].main # vertical line
-            t[850].main = t[1091].main # topleft corner
-
-            t[835].main = t[1152].main # left red blob (part 1)
-            t[836].main = t[1153].main # top red blob (part 1)
-            t[837].main = t[1154].main # top red blob (part 2)
-            t[838].main = t[1155].main # right red blob (part 1)
-
-            t[851].main = t[1216].main # left red blob (part 2)
-            t[852].main = t[1217].main # bottom red blob (part 1)
-            t[853].main = t[1218].main # bottom red blob (part 2)
-            t[854].main = t[1219].main # right red blob (part 2)
-
-            t[866].main = t[1065].main # big circle piece 1st row
-            t[867].main = t[1066].main # big circle piece 1st row
-            t[870].main = t[1189].main # medium circle piece 1st row
-            t[871].main = t[1190].main # medium circle piece 1st row
-
-            t[881].main = t[1128].main # big circle piece 2nd row
-            t[882].main = t[1129].main # big circle piece 2nd row
-            t[883].main = t[1130].main # big circle piece 2nd row
-            t[884].main = t[1131].main # big circle piece 2nd row
-            t[885].main = t[1252].main # medium circle piece 2nd row
-            t[886].main = t[1253].main # medium circle piece 2nd row
-            t[887].main = t[1254].main # medium circle piece 2nd row
-
-            t[896].main = t[1191].main # big circle piece 3rd row
-            t[897].main = t[1192].main # big circle piece 3rd row
-            t[900].main = t[1195].main # big circle piece 3rd row
-            t[901].main = t[1316].main # medium circle piece 3rd row
-            t[902].main = t[1317].main # medium circle piece 3rd row
-            t[903].main = t[1318].main # medium circle piece 3rd row
-
-            t[912].main = t[1255].main # big circle piece 4th row
-            t[913].main = t[1256].main # big circle piece 4th row
-            t[916].main = t[1259].main # big circle piece 4th row
-
-            t[929].main = t[1320].main # big circle piece 5th row
-            t[930].main = t[1321].main # big circle piece 5th row
-            t[931].main = t[1322].main # big circle piece 5th row
-            t[932].main = t[1323].main # big circle piece 5th row
-    except Exception:
-        # Fail silently
-        pass
-
-
-def LoadOverrides():
-    """
-    Load overrides
-    """
-    global Overrides
-
-    OverrideBitmap = QtGui.QPixmap('reggiedata/overrides.png')
-    Overrides = [None]*384
-    idx = 0
-    xcount = OverrideBitmap.width() // TileWidth
-    ycount = OverrideBitmap.height() // TileWidth
-    sourcex = 0
-    sourcey = 0
-
-    for y in range(ycount):
-        for x in range(xcount):
-            bmp = OverrideBitmap.copy(sourcex, sourcey, TileWidth, TileWidth)
-            Overrides[idx] = TilesetTile(bmp)
-
-            # Set collisions if it's a brick or question
-            if y <= 4:
-                if 8 < x < 20: Overrides[idx].setQuestionCollisions()
-                elif 20 <= x < 32: Overrides[idx].setBrickCollisions()
-
-            idx += 1
-            sourcex += TileWidth
-        sourcex = 0
-        sourcey += TileWidth
-        if idx % 64 != 0:
-            idx -= (idx % 64)
-            idx += 64
-
-
+            
 def SetAppStyle():
     """
     Set the application window color
@@ -2454,7 +1008,6 @@ def SetAppStyle():
     styleKey = setting('uiStyle')
     style = QtWidgets.QStyleFactory.create(styleKey)
     app.setStyle(style)
-
 
 Area = None
 Dirty = False
@@ -2511,11 +1064,11 @@ def LoadNumberFont():
     # normal Qt defines Q_WS_WIN and Q_WS_MAC but we don't have that here
     s = QtCore.QSysInfo()
     if hasattr(s, 'WindowsVersion'):
-        NumberFont = QtGui.QFont('Tahoma', (7/24) * TileWidth)
+        NumberFont = QtGui.QFont('Tahoma', (7/24) * tile.TileWidth)
     elif hasattr(s, 'MacintoshVersion'):
-        NumberFont = QtGui.QFont('Lucida Grande', (9/24) * TileWidth)
+        NumberFont = QtGui.QFont('Lucida Grande', (9/24) * tile.TileWidth)
     else:
-        NumberFont = QtGui.QFont('Sans', (8/24) * TileWidth)
+        NumberFont = QtGui.QFont('Sans', (8/24) * tile.TileWidth)
 
 def SetDirty(noautosave=False):
     global Dirty, DirtyOverride, AutoSaveDirty
@@ -2560,1219 +1113,6 @@ def MapPositionToZoneID(zones, x, y, useid=False):
 
     return rval
 
-
-
-class Metadata():
-    """
-    Class for the new level metadata system
-    """
-    # This new system is much more useful and flexible than the old
-    # system, but is incompatible with older versions of Reggie.
-    # They will fail to understand the data, and skip it like it
-    # doesn't exist. The new system is written with forward-compatibility
-    # in mind. Thus, when newer versions of Reggie are created
-    # with new metadata values, they will be easily able to add to
-    # the existing ones. In addition, the metadata system is lossless,
-    # so unrecognized values will be preserved when you open and save.
-
-    # Type values:
-    # 0 = binary
-    # 1 = string
-    # 2+ = undefined as of now - future Reggies can use them
-    # Theoretical limit to type values is 4,294,967,296
-
-    def __init__(self, data=None):
-        """
-        Creates a metadata object with the data given
-        """
-        self.DataDict = {}
-        if data is None: return
-
-        if data[0:4] != b'MD2_':
-            # This is old-style metadata - convert it
-            try:
-                strdata = ''
-                for d in data: strdata += chr(d)
-                level_info = pickle.loads(strdata)
-                for k, v in level_info.iteritems():
-                    self.setStrData(k, v)
-            except Exception: pass
-            if ('Website' not in self.DataDict) and ('Webpage' in self.DataDict):
-                self.DataDict['Website'] = self.DataDict['Webpage']
-            return
-
-        # Iterate through the data
-        idx = 4
-        while idx < len(data) - 4:
-
-            # Read the next (first) four bytes - the key length
-            rawKeyLen = data[idx:idx+4]
-            idx += 4
-
-            keyLen = (rawKeyLen[0] << 24) | (rawKeyLen[1] << 16) | (rawKeyLen[2] << 8) | rawKeyLen[3]
-
-            # Read the next (key length) bytes - the key (as a str)
-            rawKey = data[idx:idx+keyLen]
-            idx += keyLen
-
-            key = ''
-            for b in rawKey: key += chr(b)
-
-            # Read the next four bytes - the number of type entries
-            rawTypeEntries = data[idx:idx+4]
-            idx += 4
-
-            typeEntries = (rawTypeEntries[0] << 24) | (rawTypeEntries[1] << 16) | (rawTypeEntries[2] << 8) | rawTypeEntries[3]
-
-            # Iterate through each type entry
-            typeData = {}
-            for entry in range(typeEntries):
-
-                # Read the next four bytes - the type
-                rawType = data[idx:idx+4]
-                idx += 4
-
-                type = (rawType[0] << 24) | (rawType[1] << 16) | (rawType[2] << 8) | rawType[3]
-
-                # Read the next four bytes - the data length
-                rawDataLen = data[idx:idx+4]
-                idx += 4
-
-                dataLen = (rawDataLen[0] << 24) | (rawDataLen[1] << 16) | (rawDataLen[2] << 8) | rawDataLen[3]
-
-                # Read the next (data length) bytes - the data (as bytes)
-                entryData = data[idx:idx+dataLen]
-                idx += dataLen
-
-                # Add it to typeData
-                self.setOtherData(key, type, entryData)
-
-
-    def binData(self, key):
-        """
-        Returns the binary data associated with key
-        """
-        return self.otherData(key, 0)
-
-    def strData(self, key):
-        """
-        Returns the string data associated with key
-        """
-        data = self.otherData(key, 1)
-        if data is None: return
-        s = ''
-        for d in data: s += chr(d)
-        return s
-
-    def otherData(self, key, type):
-        """
-        Returns unknown data, with the given type value, associated with key (as binary data)
-        """
-        if key not in self.DataDict: return
-        if type not in self.DataDict[key]: return
-        return self.DataDict[key][type]
-
-    def setBinData(self, key, value):
-        """
-        Sets binary data, overwriting any existing binary data with that key
-        """
-        self.setOtherData(key, 0, value)
-
-    def setStrData(self, key, value):
-        """
-        Sets string data, overwriting any existing string data with that key
-        """
-        data = []
-        for char in value: data.append(ord(char))
-        self.setOtherData(key, 1, data)
-
-    def setOtherData(self, key, type, value):
-        """
-        Sets other (binary) data, overwriting any existing data with that key and type
-        """
-        if key not in self.DataDict: self.DataDict[key] = {}
-        self.DataDict[key][type] = value
-
-    def save(self):
-        """
-        Returns a bytes object that can later be loaded from
-        """
-
-        # Sort self.DataDict
-        dataDictSorted = []
-        for dataKey in self.DataDict: dataDictSorted.append((dataKey, self.DataDict[dataKey]))
-        dataDictSorted.sort(key=lambda entry: entry[0])
-
-        data = []
-
-        # Add 'MD2_'
-        data.append(ord('M'))
-        data.append(ord('D'))
-        data.append(ord('2'))
-        data.append(ord('_'))
-
-        # Iterate through self.DataDict
-        for dataKey, types in dataDictSorted:
-
-            # Add the key length (4 bytes)
-            keyLen = len(dataKey)
-            data.append(keyLen >> 24)
-            data.append((keyLen >> 16) & 0xFF)
-            data.append((keyLen >> 8) & 0xFF)
-            data.append(keyLen & 0xFF)
-
-            # Add the key (key length bytes)
-            for char in dataKey: data.append(ord(char))
-
-            # Sort the types
-            typesSorted = []
-            for type in types: typesSorted.append((type, types[type]))
-            typesSorted.sort(key=lambda entry: entry[0])
-
-            # Add the number of types (4 bytes)
-            typeNum = len(typesSorted)
-            data.append(typeNum >> 24)
-            data.append((typeNum >> 16) & 0xFF)
-            data.append((typeNum >> 8) & 0xFF)
-            data.append(typeNum & 0xFF)
-
-            # Iterate through typesSorted
-            for type, typeData in typesSorted:
-
-                # Add the type (4 bytes)
-                data.append(type >> 24)
-                data.append((type >> 16) & 0xFF)
-                data.append((type >> 8) & 0xFF)
-                data.append(type & 0xFF)
-
-                # Add the data length (4 bytes)
-                dataLen = len(typeData)
-                data.append(dataLen >> 24)
-                data.append((dataLen >> 16) & 0xFF)
-                data.append((dataLen >> 8) & 0xFF)
-                data.append(dataLen & 0xFF)
-
-                # Add the data (data length bytes)
-                for d in typeData: data.append(d)
-
-        return data
-
-
-class AbstractLevel():
-    """
-    Class for an abstract level from any game. Defines the API.
-    """
-    def __init__(self):
-        """
-        Initializes the level with default settings
-        """
-        self.filepath = None
-        self.name = 'untitled'
-
-        self.areas = []
-
-    def load(self, data, areaNum, progress=None):
-        """
-        Loads a level from bytes data. You MUST reimplement this in subclasses!
-        """
-        pass
-
-    def save(self):
-        """
-        Returns the level as a bytes object. You MUST reimplement this in subclasses!
-        """
-        return b''
-
-    def addArea(self):
-        """
-        Adds an area to the level, and returns it.
-        """
-        new = AbstractArea()
-        self.areas.append(new)
-
-        return new
-
-    def deleteArea(self, number):
-        """
-        Removes the area specified. Number is a 1-based value, not 0-based;
-        so you would pass a 1 if you wanted to delete the first area.
-        """
-        del self.areas[number - 1]
-        return True
-
-
-class Level_NSMBU(AbstractLevel):
-    """
-    Class for a level from New Super Mario Bros. U
-    """
-    def __init__(self):
-        """
-        Initializes the level with default settings
-        """
-        super().__init__()
-        self.areas.append(Area_NSMBU())
-
-    def load(self, data, areaNum, progress=None):
-        """
-        Loads a NSMBU level from bytes data.
-        """
-        super().load(data, areaNum, progress)
-
-        global Area
-
-        arc = SarcLib.SARC_Archive()
-        arc.load(data)
-
-        try:
-            courseFolder = arc['course']
-        except:
-            return False
-
-        # Sort the area data
-        areaData = {}
-        for file in courseFolder.contents:
-            name, val = file.name, file.data
-
-            if val is None: continue
-
-            if not name.startswith('course'): continue
-            if not name.endswith('.bin'): continue
-            if '_bgdatL' in name:
-                # It's a layer file
-                if len(name) != 19: continue
-                try:
-                    thisArea = int(name[6])
-                    laynum = int(name[14])
-                except ValueError: continue
-                if not (0 < thisArea < 5): continue
-
-                if thisArea not in areaData: areaData[thisArea] = [None] * 4
-                areaData[thisArea][laynum + 1] = val
-            else:
-                # It's the course file
-                if len(name) != 11: continue
-                try:
-                    thisArea = int(name[6])
-                except ValueError: continue
-                if not (0 < thisArea < 5): continue
-
-                if thisArea not in areaData: areaData[thisArea] = [None] * 4
-                areaData[thisArea][0] = val
-
-        # Create area objects
-        self.areas = []
-        thisArea = 1
-        while thisArea in areaData:
-            course = areaData[thisArea][0]
-            L0 = areaData[thisArea][1]
-            L1 = areaData[thisArea][2]
-            L2 = areaData[thisArea][3]
-
-            if thisArea == areaNum:
-                newarea = Area_NSMBU()
-                Area = newarea
-                SLib.Area = Area
-            else:
-                newarea = AbstractArea()
-
-            newarea.areanum = thisArea
-            newarea.load(course, L0, L1, L2, progress)
-            self.areas.append(newarea)
-
-            thisArea += 1
-
-
-        return True
-
-    def save(self, innerfilename):
-        """
-        Save the level back to a file
-        """
-
-        # Make a new archive
-        newArchive = SarcLib.SARC_Archive()
-
-        # Create a folder within the archive
-        courseFolder = SarcLib.Folder('course')
-        newArchive.addFolder(courseFolder)
-
-        # Go through the areas, save them and add them back to the archive
-        for areanum, area in enumerate(self.areas):
-            course, L0, L1, L2 = area.save()
-
-            if course is not None:
-                courseFolder.addFile(SarcLib.File('course%d.bin' % (areanum + 1), course))
-            if L0 is not None:
-                courseFolder.addFile(SarcLib.File('course%d_bgdatL0.bin' % (areanum + 1), L0))
-            if L1 is not None:
-                courseFolder.addFile(SarcLib.File('course%d_bgdatL1.bin' % (areanum + 1), L1))
-            if L2 is not None:
-                courseFolder.addFile(SarcLib.File('course%d_bgdatL2.bin' % (areanum + 1), L2))
-
-        # Here we have the new inner-SARC savedata
-        innersarc = newArchive.save(0x04, 0x170)
-
-        # Now make an outer SARC
-        outerArchive = SarcLib.SARC_Archive()
-        fn = innerfilename
-        outerArchive.addFile(SarcLib.File(fn, innersarc))
-        for szsThingName in szsData:
-            try:
-                spl = szsThingName.split('-')
-                int(spl[0])
-                int(spl[1])
-                continue
-            except: pass
-            outerArchive.addFile(SarcLib.File(szsThingName, szsData[szsThingName]))
-
-
-        return outerArchive.save(0x2000)
-
-
-    def addArea(self):
-        """
-        Adds an area to the level, and returns it.
-        """
-        new = Area_NSMBU()
-        self.areas.append(new)
-
-        return new
-
-
-class AbstractArea():
-    """
-    An extremely basic abstract area. Implements the basic function API.
-    """
-    def __init__(self):
-        self.areanum = 1
-        self.course = None
-        self.L0 = None
-        self.L1 = None
-        self.L2 = None
-
-    def load(self, course, L0, L1, L2, progress=None):
-        self.course = course
-        self.L0 = L0
-        self.L1 = L1
-        self.L2 = L2
-
-    def save(self):
-        return (self.course, self.L0, self.L1, self.L2)
-
-
-class AbstractParsedArea(AbstractArea):
-    """
-    An area that is parsed to load sprites, entrances, etc. Still abstracted among games.
-    Don't instantiate this! It could blow up becuase many of the functions are only defined
-    within subclasses. If you want an area object, use a game-specific subclass.
-    """
-    def __init__(self):
-        """
-        Creates a completely new area
-        """
-
-        # Default area number
-        self.areanum = 1
-
-        # Settings
-        self.defEvents = 0
-        self.wrapFlag = 0
-        self.timeLimit = 300
-        self.unk1 = 0
-        self.startEntrance = 0
-        self.unk2 = 0
-        self.unk3 = 0
-
-        # Lists of things
-        self.entrances = []
-        self.sprites = []
-        self.zones = []
-        self.locations = []
-        self.pathdata = []
-        self.paths = []
-        self.progpathdata = []
-        self.progpaths = []
-        self.comments = []
-        self.layers = [[], [], []]
-
-        # Metadata
-        self.LoadReggieInfo(None)
-
-        # Load tilesets
-        CreateTilesets()
-        #LoadTileset(0, self.tileset0)
-        #LoadTileset(1, self.tileset1)
-
-
-    def load(self, course, L0, L1, L2, progress=None):
-        """
-        Loads an area from the archive files
-        """
-
-        # with open('course3.bin', 'rb') as f:
-        #     course = f.read()
-
-        # Load in the course file and blocks
-        self.LoadBlocks(course)
-
-        # with open('L0_.bin', 'rb') as f:
-        #     L0 = f.read()
-        # with open('L1_.bin', 'rb') as f:
-        #     L1 = f.read()
-        # with open('L2_.bin', 'rb') as f:
-        #     L2 = f.read()
-        # with open('block6.bin', 'wb') as f:
-        #     f.write(self.blocks[6])
-        # with open('block9.bin', 'wb') as f:
-        #     f.write(self.blocks[9])
-        # for blocknum in range(20):
-        #     try:
-        #         with open('block%d_.bin' % blocknum, 'rb') as f:
-        #             self.blocks[blocknum] = f.read()
-        #     except: pass
-
-        # with open('course3_bgdatL0.bin', 'rb') as f:
-        #     L0 = f.read()
-        # with open('course3_bgdatL1.bin', 'rb') as f:
-        #     L1 = f.read()
-        # with open('course3_bgdatL2.bin', 'rb') as f:
-        #     L2 = f.read()
-
-        # Load stuff from individual blocks
-        self.LoadTilesetNames() # block 1
-        self.LoadOptions() # block 2
-        self.LoadEntrances() # block 7
-        self.LoadSprites() # block 8
-        self.LoadZones() # block 10 (also blocks 3, 5, and 6)
-        self.LoadLocations() # block 11
-        self.LoadPaths() # block 12 and 13
-        self.LoadProgPaths() # block 16 and 17
-
-        # Load the editor metadata
-        if self.block1pos[0] != 0x70:
-            rdsize = self.block1pos[0] - 0x70
-            rddata = course[0x70:self.block1pos[0]]
-            self.LoadReggieInfo(rddata)
-        else:
-            self.LoadReggieInfo(None)
-        del self.block1pos
-
-        # Now, load the comments
-        self.LoadComments()
-
-        # Load the tilesets
-        if progress is not None: progress.setLabelText(trans.string('Splash', 3))
-        if app.splashscrn is not None: updateSplash(trans.string('Splash', 3), 0)
-
-        CreateTilesets()
-        if progress is not None: progress.setValue(1)
-        if app.splashscrn is not None: updateSplash(trans.string('Splash', 3), 1)
-        if self.tileset0 != '': LoadTileset(0, self.tileset0)
-        if progress is not None: progress.setValue(2)
-        if app.splashscrn is not None: updateSplash(trans.string('Splash', 3), 2)
-        if self.tileset1 != '': LoadTileset(1, self.tileset1)
-        if progress is not None: progress.setValue(3)
-        if app.splashscrn is not None: updateSplash(trans.string('Splash', 3), 3)
-        if self.tileset2 != '': LoadTileset(2, self.tileset2)
-        if progress is not None: progress.setValue(4)
-        if app.splashscrn is not None: updateSplash(trans.string('Splash', 3), 4)
-        if self.tileset3 != '': LoadTileset(3, self.tileset3)
-
-        # Load the object layers
-        if progress is not None:
-            progress.setLabelText(trans.string('Splash', 1))
-            progress.setValue(5)
-        if app.splashscrn is not None:
-            updateSplash(trans.string('Splash', 1), 5)
-
-        self.layers = [[], [], []]
-
-        if L0 is not None:
-            self.LoadLayer(0, L0)
-        if L1 is not None:
-            self.LoadLayer(1, L1)
-        if L2 is not None:
-            self.LoadLayer(2, L2)
-
-        # Delete self.blocks
-        #del self.blocks
-
-        return True
-
-    def save(self):
-        """
-        Save the area back to a file
-        """
-        # Prepare this first because otherwise the game refuses to load some sprites
-        self.SortSpritesByZone()
-
-        # We don't parse blocks 4, 11, 12, 13, 14.
-        # We can create the rest manually.
-        #self.blocks = [None] * 17
-        #self.blocks[3] = b'\0\0\0\0\0\0\0\0'
-        # Other known values for block 4 in NSMBW: 0000 0002 0042 0000,
-        #                     0000 0002 0002 0000, 0000 0003 0003 0000
-        #self.blocks[5] = b'\0\0\xFF\xFF\xFF\xFF\0\0\0\0\0\0\0\0\0\0\0\0\0\0' # always this
-        #self.blocks[11] = b'' # never used
-        #self.blocks[12] = b'' # never used
-        #self.blocks[13] = b'' # paths
-        #self.blocks[14] = b'' # path nodes
-        #self.blocks[15] = b'' # progress paths
-        #self.blocks[16] = b'' # progress path nodes
-
-        # Save each block
-        self.SaveTilesetNames() # block 1
-        #self.SaveOptions() # block 2
-        self.SaveEntrances() # block 7
-        self.SaveSprites() # block 8
-        self.SaveLoadedSprites() # block 9
-        #self.SaveZones() # block 10 (and 3, 5 and 6)
-        self.SaveLocations() # block 11
-        #self.SavePaths() # blocks 14 and 15
-        #self.SaveProgPaths() # blocks 16 and 17
-
-        # Save the metadata
-        rdata = bytearray(self.Metadata.save())
-        if len(rdata) % 4 != 0:
-           for i in range(4 - (len(rdata) % 4)):
-               rdata.append(0)
-        rdata = b''#bytes(rdata)
-
-        # Save the main course file
-        # We'll be passing over the blocks array two times.
-        # Using bytearray here because it offers mutable bytes
-        # and works directly with struct.pack_into(), so it's a
-        # win-win situation
-        FileLength = (len(self.blocks) * 8) + len(rdata)
-        for block in self.blocks:
-            FileLength += len(block)
-
-        course = bytearray()
-        for i in range(FileLength): course.append(0)
-        saveblock = struct.Struct('>II')
-
-        HeaderOffset = 0
-        FileOffset = (len(self.blocks) * 8) + len(rdata)
-        for block in self.blocks:
-            blocksize = len(block)
-            saveblock.pack_into(course, HeaderOffset, FileOffset, blocksize)
-            if blocksize > 0:
-                course[FileOffset:FileOffset + blocksize] = block
-            HeaderOffset += 8
-            FileOffset += blocksize
-
-        with open('COURSE_X.bin', 'wb') as f:
-            f.write(bytes(course))
-
-        # Return stuff
-        return (
-            bytes(course),
-            self.SaveLayer(0),
-            self.SaveLayer(1),
-            self.SaveLayer(2),
-            )
-
-
-    def RemoveFromLayer(self, obj):
-        """
-        Removes a specific object from the level and updates Z-indices accordingly
-        """
-        layer = self.layers[obj.layer]
-        idx = layer.index(obj)
-        del layer[idx]
-        for i in range(idx,len(layer)):
-            upd = layer[i]
-            upd.setZValue(upd.zValue() - 1)
-
-    def SortSpritesByZone(self):
-        """
-        Sorts the sprite list by zone ID so it will work in-game
-        """
-
-        split = {}
-        zones = []
-
-        f_MapPositionToZoneID = MapPositionToZoneID
-        zonelist = self.zones
-
-        for sprite in self.sprites:
-            zone = f_MapPositionToZoneID(zonelist, sprite.objx, sprite.objy)
-            sprite.zoneID = zone
-            if not zone in split:
-                split[zone] = []
-                zones.append(zone)
-            split[zone].append(sprite)
-
-        newlist = []
-        zones.sort()
-        for z in zones:
-            newlist += split[z]
-
-        self.sprites = newlist
-
-
-    def LoadReggieInfo(self, data):
-        if (data is None) or (len(data) == 0):
-            self.Metadata = Metadata()
-            return
-
-        try: self.Metadata = Metadata(data)
-        except Exception: self.Metadata = Metadata() # fallback
-
-
-class Area_NSMBU(AbstractParsedArea):
-    """
-    Class for a parsed NSMBU level area
-    """
-    def __init__(self):
-        """
-        Creates a completely new NSMBU area
-        """
-        # Default tileset names for NSMBU
-        self.tileset0 = 'J_Kihon'
-        self.tileset1 = 'M_Nohara_Onpu'
-        self.tileset2 = ''
-        self.tileset3 = ''
-
-        super().__init__()
-
-    def LoadBlocks(self, course):
-        """
-        Loads self.blocks from the course file
-        """
-        self.blocks = [None] * 15
-        getblock = struct.Struct('>II')
-        for i in range(15):
-            data = getblock.unpack_from(course, i * 8)
-            if data[1] == 0:
-                self.blocks[i] = b''
-            else:
-                self.blocks[i] = course[data[0]:data[0] + data[1]]
-
-        self.block1pos = getblock.unpack_from(course, 0)
-
-
-    def LoadTilesetNames(self):
-        """
-        Loads block 1, the tileset names
-        """
-        data = struct.unpack_from('32s32s32s32s', self.blocks[0])
-        self.tileset0 = data[0].strip(b'\0').decode('latin-1')
-        self.tileset1 = data[1].strip(b'\0').decode('latin-1')
-        self.tileset2 = data[2].strip(b'\0').decode('latin-1')
-        self.tileset3 = data[3].strip(b'\0').decode('latin-1')
-
-
-    def LoadOptions(self):
-        """
-        Loads block 2, the general options
-        """
-        optdata = self.blocks[1]
-        optstruct = struct.Struct('>IxxxxHhLBBBx')
-        offset = 0
-        data = optstruct.unpack_from(optdata,offset)
-        self.defEvents, self.wrapFlag, self.timeLimit, self.unk1, self.startEntrance, self.unk2, self.unk3 = data
-
-
-    def LoadEntrances(self):
-        """
-        Loads block 7, the entrances
-        """
-        entdata = self.blocks[6]
-        entcount = len(entdata) // 24
-        entstruct = struct.Struct('>HHxBxxBBBBBBxBxBBBBBBx')
-        offset = 0
-        entrances = []
-        for i in range(entcount):
-            data = entstruct.unpack_from(entdata,offset)
-            entrances.append(EntranceItem(*data))
-            offset += 24
-        self.entrances = entrances
-
-
-    def LoadSprites(self):
-        """
-        Loads block 8, the sprites
-        """
-        spritedata = self.blocks[7]
-        sprcount = len(spritedata) // 24
-        sprstruct = struct.Struct('>HHH10sxx2sxxxx')
-        offset = 0
-        sprites = []
-
-        unpack = sprstruct.unpack_from
-        append = sprites.append
-        obj = SpriteItem
-        for i in range(sprcount):
-            data = unpack(spritedata, offset)
-            append(obj(data[0], data[1], data[2], data[3] + data[4]))
-            offset += 24
-        self.sprites = sprites
-
-
-    def LoadZones(self):
-        """
-        Loads blocks 3, 5, 6 and 10 - the bounding, background and zone data
-        """
-
-        # Block 3 - bounding data
-        bdngdata = self.blocks[2]
-        count = len(bdngdata) // 28
-        bdngstruct = struct.Struct('>llllHHxxxxxxxx')
-        offset = 0
-        bounding = []
-        for i in range(count):
-            datab = bdngstruct.unpack_from(bdngdata,offset)
-            bounding.append([datab[0], datab[1], datab[2], datab[3], datab[4], datab[5]])
-            offset += 28
-        self.bounding = bounding
-
-        # Block 5 - Bg data
-        bgData = self.blocks[4]
-        bgCount = len(bgData) // 28
-        offset = 0
-        bg = {}
-        for i in range(bgCount):
-            newBg = Background_NSMBU()
-            bgId = newBg.loadFrom(bgData[offset:offset + 28])
-            bg[bgId] = newBg
-            offset += 28
-        self.bg = bg
-
-        # Block 10 - zone data
-        zonedata = self.blocks[9]
-        zonestruct = struct.Struct('>hhhhHxxBBxxxxxxBBBxBxxx')
-        count = len(zonedata) // 28
-        offset = 0
-        zones = []
-        for i in range(count):
-            dataz = zonestruct.unpack_from(zonedata, offset)
-
-            # Find the proper bounding
-            boundObj = None
-            id = dataz[6]
-            for checkb in self.bounding:
-                if checkb[4] == id: boundObj = checkb
-
-            # Find the proper bg
-            bgObj = None
-            if dataz[10] in bg:
-                bgObj = bg[dataz[10]]
-
-            zones.append(ZoneItem(dataz[0], dataz[1], dataz[2], dataz[3], dataz[4], dataz[5], dataz[6], dataz[7], dataz[8], dataz[9], dataz[10], boundObj, bgObj, i))
-            offset += 28
-        self.zones = zones
-
-
-    def LoadLocations(self):
-        """
-        Loads block 11, the locations
-        """
-        locdata = self.blocks[10]
-        locstruct = struct.Struct('>HHHHBxxx')
-        count = len(locdata) // 12
-        offset = 0
-        locations = []
-        for i in range(count):
-            data = locstruct.unpack_from(locdata, offset)
-            locations.append(LocationItem(data[0], data[1], data[2], data[3], data[4]))
-            offset += 12
-        self.locations = locations
-
-
-    def LoadLayer(self, idx, layerdata):
-        """
-        Loads a specific object layer from a bytes object
-        """
-        objcount = len(layerdata) // 16
-        objstruct = struct.Struct('>HhhHHB')
-        offset = 0
-        z = (2 - idx) * 8192
-
-        layer = self.layers[idx]
-        append = layer.append
-        unpack = objstruct.unpack_from
-        for i in range(objcount):
-            data = unpack(layerdata, offset)
-            x, y = data[1], data[2]
-            append(ObjectItem(data[0] >> 12, data[0] & 4095, idx, x, y, data[3], data[4], z, data[5]))
-            z += 1
-            offset += 16
-
-
-    def LoadPaths(self):
-        """
-        Loads block 12, the paths
-        """
-        # Path struct: <BxHHH
-        pathdata = self.blocks[13]
-        pathcount = len(pathdata) // 12
-        pathstruct = struct.Struct('>BxHHH')
-        offset = 0
-        unpack = pathstruct.unpack_from
-        pathinfo = []
-        paths = []
-        for i in range(pathcount):
-            data = unpack(pathdata, offset)
-            nodes = self.LoadPathNodes(data[1], data[2])
-            add2p = {'id': int(data[0]),
-                     'nodes': [],
-                     'loops': data[3] == 2,
-                     }
-            for node in nodes:
-                add2p['nodes'].append(node)
-            pathinfo.append(add2p)
-
-
-            offset += 12
-
-        for i in range(pathcount):
-            xpi = pathinfo[i]
-            for j, xpj in enumerate(xpi['nodes']):
-                paths.append(PathItem(xpj['x'], xpj['y'], xpi, xpj))
-
-
-        self.pathdata = pathinfo
-        self.paths = paths
-
-
-    def LoadPathNodes(self, startindex, count):
-        """
-        Loads block 13, the path nodes
-        """
-        # PathNode struct: <HHffhxx
-        ret = []
-        nodedata = self.blocks[14]
-        nodestruct = struct.Struct('>HHffhxx')
-        offset = startindex * 20
-        unpack = nodestruct.unpack_from
-        for i in range(count):
-            data = unpack(nodedata, offset)
-            ret.append({'x': int(data[0]),
-                        'y': int(data[1]),
-                        'speed': float(data[2]),
-                        'accel': float(data[3]),
-                        'delay': int(data[4]),
-                        #'id' : i
-            })
-            offset += 20
-        return ret
-
-    def LoadProgPaths(self):
-        """
-        Loads block 16, the progress paths
-        """
-        return
-        # Progress path struct: <HHHxxx?xx
-        progpathdata = self.blocks[15]
-        progpathcount = len(progpathdata) // 12
-        progpathstruct = struct.Struct('>HHHxxx?xx')
-        offset = 0
-        unpack = progpathstruct.unpack_from
-        progpathinfo = []
-        progpaths = []
-        for i in range(progpathcount):
-            data = unpack(progpathdata, offset)
-            nodes = self.LoadProgPathNodes(data[1], data[2])
-            add2p = {'id': data[0],
-                     'nodes': [],
-                     'altpath': data[3],
-                     }
-            for node in nodes:
-                add2p['nodes'].append(node)
-            progpathinfo.append(add2p)
-
-            offset += 12
-
-        for i in range(progpathcount):
-            xpi = progpathinfo[i]
-            for j, xpj in enumerate(xpi['nodes']):
-                progpaths.append(ProgressPathItem(xpj['x'], xpj['y'], xpi, xpj))
-
-
-        self.progpathdata = progpathinfo
-        self.progpaths = progpaths
-
-
-    def LoadProgPathNodes(self, startindex, count):
-        """
-        Loads block 17, the progress path nodes
-        """
-        return
-        ret = []
-        nodedata = self.blocks[16]
-        nodestruct = struct.Struct('>hh16x')
-        offset = startindex * 20
-        unpack = nodestruct.unpack_from
-        for i in range(count):
-            data = unpack(nodedata, offset)
-            ret.append({'x': int(data[0]),
-                        'y': int(data[1]),
-            })
-            offset += 20
-        return ret
-
-
-    def LoadComments(self):
-        """
-        Loads the comments from self.Metadata
-        """
-        self.comments = []
-        b = self.Metadata.binData('InLevelComments_A%d' % self.areanum)
-        if b is None: return
-        idx = 0
-        while idx < len(b):
-            xpos  = b[idx]   << 24
-            xpos |= b[idx+1] << 16
-            xpos |= b[idx+2] << 8
-            xpos |= b[idx+3]
-            idx += 4
-            ypos  = b[idx]   << 24
-            ypos |= b[idx+1] << 16
-            ypos |= b[idx+2] << 8
-            ypos |= b[idx+3]
-            idx += 4
-            tlen  = b[idx]   << 24
-            tlen |= b[idx+1] << 16
-            tlen |= b[idx+2] << 8
-            tlen |= b[idx+3]
-            idx += 4
-            s = ''
-            for char in range(tlen):
-                s += chr(b[idx])
-                idx += 1
-
-            com = CommentItem(xpos, ypos, s)
-            com.listitem = QtWidgets.QListWidgetItem()
-
-            self.comments.append(com)
-
-            com.UpdateListItem()
-
-
-    def SaveTilesetNames(self):
-        """
-        Saves the tileset names back to block 1
-        """
-        self.blocks[0] = ''.join([self.tileset0.ljust(32, '\0'), self.tileset1.ljust(32, '\0'), self.tileset2.ljust(32, '\0'), self.tileset3.ljust(32, '\0')]).encode('latin-1')
-
-
-    def SaveOptions(self):
-        """
-        Saves block 2, the general options
-        """
-        optstruct = struct.Struct('>IxxxxHhLBBBx')
-        buffer = bytearray(20)
-        optstruct.pack_into(buffer, 0, self.defEvents, self.wrapFlag, self.timeLimit, self.unk1, self.startEntrance, self.unk2, self.unk3)
-        self.blocks[1] = bytes(buffer)
-
-
-    def SaveLayer(self, idx):
-        """
-        Saves an object layer to a bytes object
-        """
-        layer = self.layers[idx]
-        if not layer: return None
-
-        offset = 0
-        objstruct = struct.Struct('>HhhHHB')
-        buffer = bytearray((len(layer) * 16) + 2)
-        f_int = int
-        for obj in layer:
-            objstruct.pack_into(buffer, offset, f_int((obj.tileset << 12) | obj.type), f_int(obj.objx), f_int(obj.objy), f_int(obj.width), f_int(obj.height), f_int(obj.contents))
-            offset += 16
-        buffer[offset] = 0xFF
-        buffer[offset + 1] = 0xFF
-        return bytes(buffer)
-
-
-    def SaveEntrances(self):
-        """
-        Saves the entrances back to block 7
-        """
-        offset = 0
-        entstruct = struct.Struct('>HHxBxxBBBBBBxBxBBBBBBx')
-        buffer = bytearray(len(self.entrances) * 24)
-        zonelist = self.zones
-        for entrance in self.entrances:
-            zoneID = MapPositionToZoneID(zonelist, entrance.objx, entrance.objy)
-            entstruct.pack_into(buffer, offset, int(entrance.objx), int(entrance.objy), int(entrance.unk05), int(entrance.entid), int(entrance.destarea), int(entrance.destentrance), int(entrance.enttype), int(entrance.unk0C), zoneID, int(entrance.unk0F), int(entrance.entsettings), int(entrance.unk12), int(entrance.unk13), int(entrance.unk14), int(entrance.unk15), int(entrance.unk16))
-            offset += 24
-        self.blocks[6] = bytes(buffer)
-
-
-    def SavePaths(self):
-        """
-        Saves the paths back to block 13
-        """
-        pathstruct = struct.Struct('>BxHHH')
-        nodecount = 0
-        for path in self.pathdata:
-            nodecount += len(path['nodes'])
-        nodebuffer = bytearray(nodecount * 20)
-        nodeoffset = 0
-        nodeindex = 0
-        offset = 0
-        buffer = bytearray(len(self.pathdata) * 12)
-
-        for path in self.pathdata:
-            if(len(path['nodes']) < 1): continue
-            self.WritePathNodes(nodebuffer, nodeoffset, path['nodes'])
-
-            pathstruct.pack_into(buffer, offset, int(path['id']), int(nodeindex), int(len(path['nodes'])), 2 if path['loops'] else 0)
-            offset += 12
-            nodeoffset += len(path['nodes']) * 20
-            nodeindex += len(path['nodes'])
-
-        self.blocks[13] = bytes(buffer)
-        self.blocks[14] = bytes(nodebuffer)
-
-
-    def WritePathNodes(self, buffer, offst, nodes):
-        """
-        Writes the pathnode data to the block 14 bytearray
-        """
-        offset = int(offst)
-
-        nodestruct = struct.Struct('>HHffhxxxxxx')
-        for node in nodes:
-            nodestruct.pack_into(buffer, offset, int(node['x']), int(node['y']), float(node['speed']), float(node['accel']), int(node['delay']))
-            offset += 20
-
-
-    def SaveProgPaths(self):
-        """
-        Saves the progress paths back to block 16
-        """
-        pathstruct = struct.Struct('>HHHxxx?xx')
-        nodecount = 0
-        for path in self.progpathdata:
-            nodecount += len(path['nodes'])
-        nodebuffer = bytearray(nodecount * 20)
-        nodeoffset = 0
-        nodeindex = 0
-        offset = 0
-        buffer = bytearray(len(self.progpathdata) * 12)
-
-        for path in self.progpathdata:
-            if(len(path['nodes']) < 1): continue
-            self.WriteProgPathNodes(nodebuffer, nodeoffset, path['nodes'])
-
-            pathstruct.pack_into(buffer, offset, int(path['id']), int(nodeindex), int(len(path['nodes'])), path['altpath'])
-            offset += 12
-            nodeoffset += len(path['nodes']) * 20
-            nodeindex += len(path['nodes'])
-
-        self.blocks[15] = bytes(buffer)
-        self.blocks[16] = bytes(nodebuffer)
-
-
-    def WriteProgPathNodes(self, buffer, offst, nodes):
-        """
-        Writes the progpathnode data to the block 17 bytearray
-        """
-        offset = int(offst)
-
-        nodestruct = struct.Struct('>hh16x')
-        for node in nodes:
-            nodestruct.pack_into(buffer, offset, int(node['x']), int(node['y']))
-            offset += 20
-
-
-    def SaveSprites(self):
-        """
-        Saves the sprites back to block 8
-        """
-        offset = 0
-        sprstruct = struct.Struct('>HHH10sH2sxxxx')
-        buffer = bytearray((len(self.sprites) * 24) + 4)
-        f_int = int
-        for sprite in self.sprites:
-            try:
-                sprstruct.pack_into(buffer, offset, f_int(sprite.type), f_int(sprite.objx), f_int(sprite.objy), sprite.spritedata[:10], sprite.zoneID, sprite.spritedata[10:])
-            except struct.error:
-                # Hopefully this will solve the mysterious bug, and will
-                # soon no longer be necessary.
-                raise ValueError('SaveSprites struct.error. Current sprite data dump:\n' + \
-                    str(offset) + '\n' + \
-                    str(sprite.type) + '\n' + \
-                    str(sprite.objx) + '\n' + \
-                    str(sprite.objy) + '\n' + \
-                    str(sprite.spritedata[:6]) + '\n' + \
-                    str(sprite.zoneID) + '\n' + \
-                    str(bytes([sprite.spritedata[7],])) + '\n',
-                    )
-            offset += 24
-        buffer[offset] = 0xFF
-        buffer[offset + 1] = 0xFF
-        buffer[offset + 2] = 0xFF
-        buffer[offset + 3] = 0xFF
-        self.blocks[7] = bytes(buffer)
-
-
-    def SaveLoadedSprites(self):
-        """
-        Saves the list of loaded sprites back to block 9
-        """
-        ls = []
-        for sprite in self.sprites:
-            if sprite.type not in ls: ls.append(sprite.type)
-        ls.sort()
-
-        offset = 0
-        sprstruct = struct.Struct('>Hxx')
-        buffer = bytearray(len(ls) * 4)
-        for s in ls:
-            sprstruct.pack_into(buffer, offset, int(s))
-            offset += 4
-        self.blocks[8] = bytes(buffer)
-
-
-    def SaveZones(self):
-        """
-        Saves blocks 10, 3, 5 and 6, the zone data, boundings, bgA and bgB data respectively
-        """
-        bdngstruct = struct.Struct('>llllxBxBxxxx')
-        bgAstruct = struct.Struct('>xBhhhhHHHxxxBxxxx')
-        bgBstruct = struct.Struct('>xBhhhhHHHxxxBxxxx')
-        zonestruct = struct.Struct('>HHHHHHBBBBxBBBBxBB')
-        offset = 0
-        i = 0
-        zcount = len(Area.zones)
-        buffer2 = bytearray(24 * zcount)
-        buffer4 = bytearray(24 * zcount)
-        buffer5 = bytearray(24 * zcount)
-        buffer9 = bytearray(24 * zcount)
-        for z in Area.zones:
-            bdngstruct.pack_into(buffer2, offset, z.yupperbound, z.ylowerbound, z.yupperbound2, z.ylowerbound2, i, 0xF)
-            bgAstruct.pack_into(buffer4, offset, i, z.XscrollA, z.YscrollA, z.YpositionA, z.XpositionA, z.bg1A, z.bg2A, z.bg3A, z.ZoomA)
-            bgBstruct.pack_into(buffer5, offset, i, z.XscrollB, z.YscrollB, z.YpositionB, z.XpositionB, z.bg1B, z.bg2B, z.bg3B, z.ZoomB)
-            zonestruct.pack_into(buffer9, offset, z.objx, z.objy, z.width, z.height, z.modeldark, z.terraindark, i, i, z.cammode, z.camzoom, z.visibility, i, i, z.camtrack, z.music, z.sfxmod)
-            offset += 24
-            i += 1
-
-        self.blocks[2] = bytes(buffer2)
-        self.blocks[4] = bytes(buffer4)
-        self.blocks[5] = bytes(buffer5)
-        self.blocks[9] = bytes(buffer9)
-
-
-    def SaveLocations(self):
-        """
-        Saves block 11, the location data
-        """
-        locstruct = struct.Struct('>HHHHBxxx')
-        offset = 0
-        zcount = len(Area.locations)
-        buffer = bytearray(12 * zcount)
-
-        for z in Area.locations:
-            locstruct.pack_into(buffer, offset, int(z.objx), int(z.objy), int(z.width), int(z.height), int(z.id))
-            offset += 12
-
-        self.blocks[10] = bytes(buffer)
-
-
 class ListWidgetItem_SortsByOther(QtWidgets.QListWidgetItem):
     """
     A ListWidgetItem that defers sorting to another object.
@@ -3809,7 +1149,7 @@ class LevelEditorItem(QtWidgets.QGraphicsItem):
         Makes sure positions don't go out of bounds and updates them as necessary
         """
 
-        tileWidthMult = TileWidth / 16
+        tile.TileWidthMult = tile.TileWidth / 16
         if change == QtWidgets.QGraphicsItem.ItemPositionChange:
             # snap to 24x24
             newpos = value
@@ -3821,45 +1161,45 @@ class LevelEditorItem(QtWidgets.QGraphicsItem):
                 else: objectsSelected = any([isinstance(thing, ObjectItem) for thing in mainWindow.CurrentSelection])
                 if QtWidgets.QApplication.keyboardModifiers() == Qt.AltModifier:
                     # Alt is held; don't snap
-                    newpos.setX(int(int((newpos.x() + 0.75) / tileWidthMult) * tileWidthMult))
-                    newpos.setY(int(int((newpos.y() + 0.75) / tileWidthMult) * tileWidthMult))
+                    newpos.setX(int(int((newpos.x() + 0.75) / tile.TileWidthMult) * tile.TileWidthMult))
+                    newpos.setY(int(int((newpos.y() + 0.75) / tile.TileWidthMult) * tile.TileWidthMult))
                 elif not objectsSelected and self.isSelected() and len(mainWindow.CurrentSelection) > 1:
                     # Snap to 8x8, but with the dragoffsets
                     dragoffsetx, dragoffsety = int(self.dragoffsetx), int(self.dragoffsety)
-                    if dragoffsetx < -(TileWidth / 2): dragoffsetx += TileWidth / 2
-                    if dragoffsety < -(TileWidth / 2): dragoffsety += TileWidth / 2
-                    if dragoffsetx == 0: dragoffsetx = -(TileWidth / 2)
-                    if dragoffsety == 0: dragoffsety = -(TileWidth / 2)
-                    referenceX = int((newpos.x() + TileWidth / 4 + TileWidth / 2 + dragoffsetx) / (TileWidth / 2)) * TileWidth / 2
-                    referenceY = int((newpos.y() + TileWidth / 4 + TileWidth / 2 + dragoffsety) / (TileWidth / 2)) * TileWidth / 2
-                    newpos.setX(referenceX - (TileWidth / 2 + dragoffsetx))
-                    newpos.setY(referenceY - (TileWidth / 2 + dragoffsety))
+                    if dragoffsetx < -(tile.TileWidth / 2): dragoffsetx += tile.TileWidth / 2
+                    if dragoffsety < -(tile.TileWidth / 2): dragoffsety += tile.TileWidth / 2
+                    if dragoffsetx == 0: dragoffsetx = -(tile.TileWidth / 2)
+                    if dragoffsety == 0: dragoffsety = -(tile.TileWidth / 2)
+                    referenceX = int((newpos.x() + tile.TileWidth / 4 + tile.TileWidth / 2 + dragoffsetx) / (tile.TileWidth / 2)) * tile.TileWidth / 2
+                    referenceY = int((newpos.y() + tile.TileWidth / 4 + tile.TileWidth / 2 + dragoffsety) / (tile.TileWidth / 2)) * tile.TileWidth / 2
+                    newpos.setX(referenceX - (tile.TileWidth / 2 + dragoffsetx))
+                    newpos.setY(referenceY - (tile.TileWidth / 2 + dragoffsety))
                 elif objectsSelected and self.isSelected():
                     # Objects are selected, too; move in sync by snapping to whole blocks
                     dragoffsetx, dragoffsety = int(self.dragoffsetx), int(self.dragoffsety)
-                    if dragoffsetx == 0: dragoffsetx = -TileWidth
-                    if dragoffsety == 0: dragoffsety = -TileWidth
-                    referenceX = int((newpos.x() + TileWidth / 2 + TileWidth + dragoffsetx) / TileWidth) * TileWidth
-                    referenceY = int((newpos.y() + TileWidth / 2 + TileWidth + dragoffsety) / TileWidth) * TileWidth
-                    newpos.setX(referenceX - (TileWidth + dragoffsetx))
-                    newpos.setY(referenceY - (TileWidth + dragoffsety))
+                    if dragoffsetx == 0: dragoffsetx = -tile.TileWidth
+                    if dragoffsety == 0: dragoffsety = -tile.TileWidth
+                    referenceX = int((newpos.x() + tile.TileWidth / 2 + tile.TileWidth + dragoffsetx) / tile.TileWidth) * tile.TileWidth
+                    referenceY = int((newpos.y() + tile.TileWidth / 2 + tile.TileWidth + dragoffsety) / tile.TileWidth) * tile.TileWidth
+                    newpos.setX(referenceX - (tile.TileWidth + dragoffsetx))
+                    newpos.setY(referenceY - (tile.TileWidth + dragoffsety))
                 else:
                     # Snap to 8x8
-                    newpos.setX(int(int((newpos.x() + TileWidth / 4) / (TileWidth / 2)) * TileWidth / 2))
-                    newpos.setY(int(int((newpos.y() + TileWidth / 4) / (TileWidth / 2)) * TileWidth / 2))
+                    newpos.setX(int(int((newpos.x() + tile.TileWidth / 4) / (tile.TileWidth / 2)) * tile.TileWidth / 2))
+                    newpos.setY(int(int((newpos.y() + tile.TileWidth / 4) / (tile.TileWidth / 2)) * tile.TileWidth / 2))
 
             x = newpos.x()
             y = newpos.y()
 
             # don't let it get out of the boundaries
             if x < 0: newpos.setX(0)
-            if x > 1023 * TileWidth: newpos.setX(1023 * TileWidth)
+            if x > 1023 * tile.TileWidth: newpos.setX(1023 * tile.TileWidth)
             if y < 0: newpos.setY(0)
-            if y > 511 * TileWidth: newpos.setY(511 * TileWidth)
+            if y > 511 * tile.TileWidth: newpos.setY(511 * tile.TileWidth)
 
             # update the data
-            x = int(newpos.x() / tileWidthMult)
-            y = int(newpos.y() / tileWidthMult)
+            x = int(newpos.x() / tile.TileWidthMult)
+            y = int(newpos.y() / tile.TileWidthMult)
             if x != self.objx or y != self.objy:
                 updRect = QtCore.QRectF(
                     self.x() + self.BoundingRect.x(),
@@ -3996,7 +1336,7 @@ class ObjectItem(LevelEditorItem):
 
         global DirtyOverride
         DirtyOverride += 1
-        self.setPos(x * TileWidth,y * TileWidth)
+        self.setPos(x * tile.TileWidth,y * tile.TileWidth)
         DirtyOverride -= 1
 
         self.setZValue(z)
@@ -4043,10 +1383,10 @@ class ObjectItem(LevelEditorItem):
         Recreates the bounding and selection rects
         """
         self.prepareGeometryChange()
-        GrabberSide = 5 / 24 * TileWidth
-        self.BoundingRect = QtCore.QRectF(0, 0, TileWidth * self.width, TileWidth * self.height)
-        self.SelectionRect = QtCore.QRectF(0, 0, (TileWidth * self.width) - 1, (TileWidth * self.height) - 1)
-        self.GrabberRect = QtCore.QRectF((TileWidth * self.width) - GrabberSide, (TileWidth * self.height) - GrabberSide, GrabberSide, GrabberSide)
+        GrabberSide = 5 / 24 * tile.TileWidth
+        self.BoundingRect = QtCore.QRectF(0, 0, tile.TileWidth * self.width, tile.TileWidth * self.height)
+        self.SelectionRect = QtCore.QRectF(0, 0, (tile.TileWidth * self.width) - 1, (tile.TileWidth * self.height) - 1)
+        self.GrabberRect = QtCore.QRectF((tile.TileWidth * self.width) - GrabberSide, (tile.TileWidth * self.height) - GrabberSide, GrabberSide, GrabberSide)
         self.LevelRect = QtCore.QRectF(self.objx, self.objy, self.width, self.height)
 
 
@@ -4061,20 +1401,20 @@ class ObjectItem(LevelEditorItem):
 
             # snap to 24x24
             newpos = value
-            newpos.setX(int((newpos.x() + TileWidth / 2) / TileWidth) * TileWidth)
-            newpos.setY(int((newpos.y() + TileWidth / 2) / TileWidth) * TileWidth)
+            newpos.setX(int((newpos.x() + tile.TileWidth / 2) / tile.TileWidth) * tile.TileWidth)
+            newpos.setY(int((newpos.y() + tile.TileWidth / 2) / tile.TileWidth) * tile.TileWidth)
             x = newpos.x()
             y = newpos.y()
 
             # don't let it get out of the boundaries
             if x < 0: newpos.setX(0)
-            if x > TileWidth * 1023: newpos.setX(TileWidth * 1023)
+            if x > tile.TileWidth * 1023: newpos.setX(tile.TileWidth * 1023)
             if y < 0: newpos.setY(0)
-            if y > TileWidth * 511: newpos.setY(TileWidth * 511)
+            if y > tile.TileWidth * 511: newpos.setY(tile.TileWidth * 511)
 
             # update the data
-            x = int(newpos.x() / TileWidth)
-            y = int(newpos.y() / TileWidth)
+            x = int(newpos.x() / tile.TileWidth)
+            y = int(newpos.y() / tile.TileWidth)
             if x != self.objx or y != self.objy:
                 self.LevelRect.moveTo(x, y)
 
@@ -4090,8 +1430,8 @@ class ObjectItem(LevelEditorItem):
                 #updRect = QtCore.QRectF(self.x(), self.y(), self.BoundingRect.width(), self.BoundingRect.height())
                 #scene.invalidate(updRect)
 
-                scene.invalidate(self.x(), self.y(), self.width * TileWidth, self.height * TileWidth, QtWidgets.QGraphicsScene.BackgroundLayer)
-                #scene.invalidate(newpos.x(), newpos.y(), self.width * TileWidth, self.height * TileWidth, QtWidgets.QGraphicsScene.BackgroundLayer)
+                scene.invalidate(self.x(), self.y(), self.width * tile.TileWidth, self.height * tile.TileWidth, QtWidgets.QGraphicsScene.BackgroundLayer)
+                #scene.invalidate(newpos.x(), newpos.y(), self.width * tile.TileWidth, self.height * tile.TileWidth, QtWidgets.QGraphicsScene.BackgroundLayer)
 
             return newpos
 
@@ -4137,8 +1477,8 @@ class ObjectItem(LevelEditorItem):
         if self.isSelected() and self.GrabberRect.contains(event.pos()):
             # start dragging
             self.dragging = True
-            self.dragstartx = int((event.pos().x() - TileWidth / 2) / TileWidth)
-            self.dragstarty = int((event.pos().y() - TileWidth / 2) / TileWidth)
+            self.dragstartx = int((event.pos().x() - tile.TileWidth / 2) / tile.TileWidth)
+            self.dragstarty = int((event.pos().y() - tile.TileWidth / 2) / tile.TileWidth)
             self.objsDragging = {}
             for selitem in mainWindow.scene.selectedItems():
                 if not isinstance(selitem, ObjectItem): continue
@@ -4160,8 +1500,8 @@ class ObjectItem(LevelEditorItem):
             dsx = self.dragstartx
             dsy = self.dragstarty
 
-            clickedx = int((event.pos().x() - TileWidth / 2) / TileWidth)
-            clickedy = int((event.pos().y() - TileWidth / 2) / TileWidth)
+            clickedx = int((event.pos().x() - tile.TileWidth / 2) / tile.TileWidth)
+            clickedy = int((event.pos().y() - tile.TileWidth / 2) / tile.TileWidth)
 
             cx = self.objx
             cy = self.objy
@@ -4187,8 +1527,8 @@ class ObjectItem(LevelEditorItem):
                     obj.updateObjCache()
 
                     oldrect = obj.BoundingRect
-                    oldrect.translate(cx * TileWidth, cy * TileWidth)
-                    newrect = QtCore.QRectF(obj.x(), obj.y(), obj.width * TileWidth, obj.height * TileWidth)
+                    oldrect.translate(cx * tile.TileWidth, cy * tile.TileWidth)
+                    newrect = QtCore.QRectF(obj.x(), obj.y(), obj.width * tile.TileWidth, obj.height * tile.TileWidth)
                     updaterect = oldrect.united(newrect)
 
                     obj.UpdateRects()
@@ -4328,7 +1668,7 @@ class ZoneItem(LevelEditorItem):
 
         global DirtyOverride
         DirtyOverride += 1
-        self.setPos(int(a * TileWidth / 16), int(b * TileWidth / 16))
+        self.setPos(int(a * tile.TileWidth / 16), int(b * tile.TileWidth / 16))
         DirtyOverride -= 1
         self.setZValue(50000)
 
@@ -4348,10 +1688,10 @@ class ZoneItem(LevelEditorItem):
             grabberWidth = 500 / mainWindow.ZoomLevel
             if grabberWidth < 5: grabberWidth = 5
         else: grabberWidth = 5
-        grabberWidth *= TileWidth / 24
+        grabberWidth *= tile.TileWidth / 24
 
         self.prepareGeometryChange()
-        mult = TileWidth / 16
+        mult = tile.TileWidth / 16
         self.BoundingRect = QtCore.QRectF(0, 0, self.width * mult, self.height * mult)
         self.ZoneRect = QtCore.QRectF(self.objx, self.objy, self.width, self.height)
         self.DrawRect = QtCore.QRectF(3, 3, int(self.width * mult) - 6, int(self.height * mult) - 6)
@@ -4372,20 +1712,20 @@ class ZoneItem(LevelEditorItem):
 
         # Paint an indicator line to show the leftmost edge of
         # where entrances can be safely placed
-        if TileWidth * 13 < self.DrawRect.width():
-            painter.setPen(QtGui.QPen(theme.color('zone_entrance_helper'), 2 * TileWidth / 24))
-            lineStart = QtCore.QPointF(self.DrawRect.x() + (TileWidth * 13), self.DrawRect.y())
-            lineEnd = QtCore.QPointF(self.DrawRect.x() + (TileWidth * 13), self.DrawRect.y() + self.DrawRect.height())
+        if tile.TileWidth * 13 < self.DrawRect.width():
+            painter.setPen(QtGui.QPen(theme.color('zone_entrance_helper'), 2 * tile.TileWidth / 24))
+            lineStart = QtCore.QPointF(self.DrawRect.x() + (tile.TileWidth * 13), self.DrawRect.y())
+            lineEnd = QtCore.QPointF(self.DrawRect.x() + (tile.TileWidth * 13), self.DrawRect.y() + self.DrawRect.height())
             #painter.drawLine(lineStart, lineEnd)
 
         # Now paint the borders
-        painter.setPen(QtGui.QPen(theme.color('zone_lines'), 3 * TileWidth / 24))
+        painter.setPen(QtGui.QPen(theme.color('zone_lines'), 3 * tile.TileWidth / 24))
         if (self.visibility >= 32) and RealViewEnabled:
             painter.setBrush(QtGui.QBrush(theme.color('zone_dark_fill')))
         painter.drawRect(self.DrawRect)
 
         # And text
-        painter.setPen(QtGui.QPen(theme.color('zone_text'), 3 * TileWidth / 24))
+        painter.setPen(QtGui.QPen(theme.color('zone_text'), 3 * tile.TileWidth / 24))
         painter.setFont(self.font)
         painter.drawText(self.TitlePos, self.title)
 
@@ -4405,26 +1745,26 @@ class ZoneItem(LevelEditorItem):
         if self.GrabberRectTL.contains(event.pos()):
             # start dragging
             self.dragging = True
-            self.dragstartx = int(event.pos().x() / TileWidth * 16)
-            self.dragstarty = int(event.pos().y() / TileWidth * 16)
+            self.dragstartx = int(event.pos().x() / tile.TileWidth * 16)
+            self.dragstarty = int(event.pos().y() / tile.TileWidth * 16)
             self.dragcorner = 1
             event.accept()
         elif self.GrabberRectTR.contains(event.pos()):
             self.dragging = True
-            self.dragstartx = int(event.pos().x() / TileWidth * 16)
-            self.dragstarty = int(event.pos().y() / TileWidth * 16)
+            self.dragstartx = int(event.pos().x() / tile.TileWidth * 16)
+            self.dragstarty = int(event.pos().y() / tile.TileWidth * 16)
             self.dragcorner = 2
             event.accept()
         elif self.GrabberRectBL.contains(event.pos()):
             self.dragging = True
-            self.dragstartx = int(event.pos().x() / TileWidth * 16)
-            self.dragstarty = int(event.pos().y() / TileWidth * 16)
+            self.dragstartx = int(event.pos().x() / tile.TileWidth * 16)
+            self.dragstarty = int(event.pos().y() / tile.TileWidth * 16)
             self.dragcorner = 3
             event.accept()
         elif self.GrabberRectBR.contains(event.pos()):
             self.dragging = True
-            self.dragstartx = int(event.pos().x() / TileWidth * 16)
-            self.dragstarty = int(event.pos().y() / TileWidth * 16)
+            self.dragstartx = int(event.pos().x() / tile.TileWidth * 16)
+            self.dragstarty = int(event.pos().y() / tile.TileWidth * 16)
             self.dragcorner = 4
             event.accept()
         else:
@@ -4441,8 +1781,8 @@ class ZoneItem(LevelEditorItem):
             # resize it
             dsx = self.dragstartx
             dsy = self.dragstarty
-            clickedx = int(event.pos().x() / TileWidth * 16)
-            clickedy = int(event.pos().y() / TileWidth * 16)
+            clickedx = int(event.pos().x() / tile.TileWidth * 16)
+            clickedy = int(event.pos().y() / tile.TileWidth * 16)
             corner = self.dragcorner
 
             cx = self.objx
@@ -4493,23 +1833,23 @@ class ZoneItem(LevelEditorItem):
                     self.width += xdelta
                     self.height += ydelta
 
-                if self.width < 16 * TileWidth / 24:
-                    self.objx -= (16 * TileWidth / 24 - self.width)
-                    self.width = 16 * TileWidth / 24
-                if self.height < 16 * TileWidth / 24:
-                    self.objy -= (16 * TileWidth / 24 - self.height)
-                    self.height = 16 * TileWidth / 24
+                if self.width < 16 * tile.TileWidth / 24:
+                    self.objx -= (16 * tile.TileWidth / 24 - self.width)
+                    self.width = 16 * tile.TileWidth / 24
+                if self.height < 16 * tile.TileWidth / 24:
+                    self.objy -= (16 * tile.TileWidth / 24 - self.height)
+                    self.height = 16 * tile.TileWidth / 24
 
-                if self.objx < 16 * TileWidth / 24:
-                    self.width -= (16 * TileWidth / 24 - self.objx)
-                    self.objx = 16 * TileWidth / 24
-                if self.objy < 16 * TileWidth / 24:
-                    self.height -= (16 * TileWidth / 24 - self.objy)
-                    self.objy = 16 * TileWidth / 24
+                if self.objx < 16 * tile.TileWidth / 24:
+                    self.width -= (16 * tile.TileWidth / 24 - self.objx)
+                    self.objx = 16 * tile.TileWidth / 24
+                if self.objy < 16 * tile.TileWidth / 24:
+                    self.height -= (16 * tile.TileWidth / 24 - self.objy)
+                    self.objy = 16 * tile.TileWidth / 24
 
                 oldrect = self.BoundingRect
-                oldrect.translate(cx * TileWidth / 16, cy * TileWidth / 16)
-                newrect = QtCore.QRectF(self.x(), self.y(), self.width * TileWidth / 16, self.height * TileWidth / 16)
+                oldrect.translate(cx * tile.TileWidth / 16, cy * tile.TileWidth / 16)
+                newrect = QtCore.QRectF(self.x(), self.y(), self.width * tile.TileWidth / 16, self.height * tile.TileWidth / 16)
                 updaterect = oldrect.united(newrect)
                 updaterect.setTop(updaterect.top() - 3)
                 updaterect.setLeft(updaterect.left() - 3)
@@ -4517,7 +1857,7 @@ class ZoneItem(LevelEditorItem):
                 updaterect.setBottom(updaterect.bottom() + 3)
 
                 self.UpdateRects()
-                self.setPos(int(self.objx * TileWidth / 16), int(self.objy * TileWidth / 16))
+                self.setPos(int(self.objx * tile.TileWidth / 16), int(self.objy * tile.TileWidth / 16))
                 self.scene().update(updaterect)
 
                 mainWindow.levelOverview.update()
@@ -4553,7 +1893,7 @@ class LocationItem(LevelEditorItem):
         LevelEditorItem.__init__(self)
 
         self.font = NumberFont
-        self.TitlePos = QtCore.QPointF(TileWidth / 4, TileWidth / 4)
+        self.TitlePos = QtCore.QPointF(tile.TileWidth / 4, tile.TileWidth / 4)
         self.objx = x
         self.objy = y
         self.width = width
@@ -4568,7 +1908,7 @@ class LocationItem(LevelEditorItem):
 
         global DirtyOverride
         DirtyOverride += 1
-        self.setPos(int(x * TileWidth / 16), int(y * TileWidth / 16))
+        self.setPos(int(x * tile.TileWidth / 16), int(y * tile.TileWidth / 16))
         DirtyOverride -= 1
 
         self.dragging = False
@@ -4601,12 +1941,12 @@ class LocationItem(LevelEditorItem):
         self.prepareGeometryChange()
         if self.width == 0: self.width == 1
         if self.height == 0: self.height == 1
-        GrabberSide = 5 * TileWidth / 24
-        self.BoundingRect = QtCore.QRectF(0, 0, self.width * TileWidth / 16, self.height * TileWidth / 16)
-        self.SelectionRect = QtCore.QRectF(self.objx * TileWidth / 16, self.objy * TileWidth / 16, self.width * TileWidth / 16, self.height * TileWidth / 16)
+        GrabberSide = 5 * tile.TileWidth / 24
+        self.BoundingRect = QtCore.QRectF(0, 0, self.width * tile.TileWidth / 16, self.height * tile.TileWidth / 16)
+        self.SelectionRect = QtCore.QRectF(self.objx * tile.TileWidth / 16, self.objy * tile.TileWidth / 16, self.width * tile.TileWidth / 16, self.height * tile.TileWidth / 16)
         self.ZoneRect = QtCore.QRectF(self.objx, self.objy, self.width, self.height)
-        self.DrawRect = QtCore.QRectF(1, 1, (self.width * TileWidth / 16) - 2, (self.height * TileWidth / 16) - 2)
-        self.GrabberRect = QtCore.QRectF(((TileWidth / 16) * self.width) - GrabberSide, ((TileWidth / 16) * self.height) - GrabberSide, GrabberSide, GrabberSide)
+        self.DrawRect = QtCore.QRectF(1, 1, (self.width * tile.TileWidth / 16) - 2, (self.height * tile.TileWidth / 16) - 2)
+        self.GrabberRect = QtCore.QRectF(((tile.TileWidth / 16) * self.width) - GrabberSide, ((tile.TileWidth / 16) * self.height) - GrabberSide, GrabberSide, GrabberSide)
         self.UpdateListItem()
 
 
@@ -4621,16 +1961,16 @@ class LocationItem(LevelEditorItem):
         # Draw the purple rectangle
         if not self.isSelected():
             painter.setBrush(QtGui.QBrush(theme.color('location_fill')))
-            painter.setPen(QtGui.QPen(theme.color('location_lines'), TileWidth / 24))
+            painter.setPen(QtGui.QPen(theme.color('location_lines'), tile.TileWidth / 24))
         else:
             painter.setBrush(QtGui.QBrush(theme.color('location_fill_s')))
-            painter.setPen(QtGui.QPen(theme.color('location_lines_s'), TileWidth / 24, Qt.DotLine))
+            painter.setPen(QtGui.QPen(theme.color('location_lines_s'), tile.TileWidth / 24, Qt.DotLine))
         painter.drawRect(self.DrawRect)
 
         # Draw the ID
         painter.setPen(QtGui.QPen(theme.color('location_text')))
         painter.setFont(self.font)
-        painter.drawText(QtCore.QRectF(0, 0, TileWidth / 2, TileWidth / 2), Qt.AlignCenter, self.title)
+        painter.drawText(QtCore.QRectF(0, 0, tile.TileWidth / 2, tile.TileWidth / 2), Qt.AlignCenter, self.title)
 
         # Draw the resizer rectangle, if selected
         if self.isSelected(): painter.fillRect(self.GrabberRect, theme.color('location_lines_s'))
@@ -4643,8 +1983,8 @@ class LocationItem(LevelEditorItem):
         if self.isSelected() and self.GrabberRect.contains(event.pos()):
             # start dragging
             self.dragging = True
-            self.dragstartx = int(event.pos().x() / TileWidth * 16)
-            self.dragstarty = int(event.pos().y() / TileWidth * 16)
+            self.dragstartx = int(event.pos().x() / tile.TileWidth * 16)
+            self.dragstarty = int(event.pos().y() / tile.TileWidth * 16)
             event.accept()
         else:
             LevelEditorItem.mousePressEvent(self, event)
@@ -4659,8 +1999,8 @@ class LocationItem(LevelEditorItem):
             # resize it
             dsx = self.dragstartx
             dsy = self.dragstarty
-            clickedx = event.pos().x() / TileWidth * 16
-            clickedy = event.pos().y() / TileWidth * 16
+            clickedx = event.pos().x() / tile.TileWidth * 16
+            clickedy = event.pos().y() / tile.TileWidth * 16
 
             cx = self.objx
             cy = self.objy
@@ -4676,8 +2016,8 @@ class LocationItem(LevelEditorItem):
                 self.height += clickedy - dsy
 
                 oldrect = self.BoundingRect
-                oldrect.translate(cx * TileWidth / 16, cy * TileWidth / 16)
-                newrect = QtCore.QRectF(self.x(), self.y(), self.width * TileWidth / 16, self.height * TileWidth / 16)
+                oldrect.translate(cx * tile.TileWidth / 16, cy * tile.TileWidth / 16)
+                newrect = QtCore.QRectF(self.x(), self.y(), self.width * tile.TileWidth / 16, self.height * tile.TileWidth / 16)
                 updaterect = oldrect.united(newrect)
 
                 self.UpdateRects()
@@ -4686,11 +2026,6 @@ class LocationItem(LevelEditorItem):
 
                 if self.sizeChanged is not None:
                     self.sizeChanged(self, self.width, self.height)
-
-                if RealViewEnabled:
-                    for sprite in Area.sprites:
-                        if self.id in sprite.ImageObj.locationIDs and sprite.ImageObj.updateSceneAfterLocationMoved:
-                            self.scene().update()
 
             event.accept()
         else:
@@ -4716,8 +2051,8 @@ class SpriteItem(LevelEditorItem):
     """
     Level editor item that represents a sprite
     """
-    BoundingRect = QtCore.QRectF(0, 0, TileWidth, TileWidth)
-    SelectionRect = QtCore.QRectF(0, 0, TileWidth - 1, TileWidth - 1)
+    BoundingRect = QtCore.QRectF(0, 0, tile.TileWidth, tile.TileWidth)
+    SelectionRect = QtCore.QRectF(0, 0, tile.TileWidth - 1, tile.TileWidth - 1)
 
     def __init__(self, type, x, y, data):
         """
@@ -4732,7 +2067,7 @@ class SpriteItem(LevelEditorItem):
         self.objy = y
         self.spritedata = data
         self.listitem = None
-        self.LevelRect = QtCore.QRectF(self.objx / 16, self.objy / 16, TileWidth / 16, TileWidth / 16)
+        self.LevelRect = QtCore.QRectF(self.objx / 16, self.objy / 16, tile.TileWidth / 16, tile.TileWidth / 16)
         self.ChangingPos = False
 
         SLib.SpriteImage.loadImages()
@@ -4752,8 +2087,8 @@ class SpriteItem(LevelEditorItem):
         global DirtyOverride
         DirtyOverride += 1
         self.setPos(
-            int((self.objx + self.ImageObj.xOffset) * TileWidth / 16),
-            int((self.objy + self.ImageObj.yOffset) * TileWidth / 16),
+            int((self.objx + self.ImageObj.xOffset) * tile.TileWidth / 16),
+            int((self.objy + self.ImageObj.yOffset) * tile.TileWidth / 16),
             )
         DirtyOverride -= 1
 
@@ -4911,8 +2246,8 @@ class SpriteItem(LevelEditorItem):
         self.UpdateRects()
         self.ChangingPos = True
         self.setPos(
-            int((self.objx + self.ImageObj.xOffset) * TileWidth / 16),
-            int((self.objy + self.ImageObj.yOffset) * TileWidth / 16),
+            int((self.objx + self.ImageObj.xOffset) * tile.TileWidth / 16),
+            int((self.objy + self.ImageObj.yOffset) * tile.TileWidth / 16),
             )
         self.ChangingPos = False
         if self.scene() is not None: self.scene().update()
@@ -4936,8 +2271,8 @@ class SpriteItem(LevelEditorItem):
 
         self.ChangingPos = True
         self.setPos(
-            int((self.objx + self.ImageObj.xOffset) * TileWidth / 16),
-            int((self.objy + self.ImageObj.yOffset) * TileWidth / 16),
+            int((self.objx + self.ImageObj.xOffset) * tile.TileWidth / 16),
+            int((self.objy + self.ImageObj.yOffset) * tile.TileWidth / 16),
             )
         self.ChangingPos = False
 
@@ -4959,8 +2294,8 @@ class SpriteItem(LevelEditorItem):
         # Get rects
         imgRect = QtCore.QRectF(
             0, 0,
-            self.ImageObj.width * TileWidth / 16,
-            self.ImageObj.height * TileWidth / 16,
+            self.ImageObj.width * tile.TileWidth / 16,
+            self.ImageObj.height * tile.TileWidth / 16,
             )
         spriteboxRect = QtCore.QRectF(
             0, 0,
@@ -4968,12 +2303,12 @@ class SpriteItem(LevelEditorItem):
             self.ImageObj.spritebox.BoundingRect.height(),
             )
         imgOffsetRect = imgRect.translated(
-            (self.objx + self.ImageObj.xOffset) * (TileWidth / 16),
-            (self.objy + self.ImageObj.yOffset) * (TileWidth / 16),
+            (self.objx + self.ImageObj.xOffset) * (tile.TileWidth / 16),
+            (self.objy + self.ImageObj.yOffset) * (tile.TileWidth / 16),
             )
         spriteboxOffsetRect = spriteboxRect.translated(
-            (self.objx * (TileWidth / 16)) + self.ImageObj.spritebox.BoundingRect.topLeft().x(),
-            (self.objy * (TileWidth / 16)) + self.ImageObj.spritebox.BoundingRect.topLeft().y(),
+            (self.objx * (tile.TileWidth / 16)) + self.ImageObj.spritebox.BoundingRect.topLeft().x(),
+            (self.objy * (tile.TileWidth / 16)) + self.ImageObj.spritebox.BoundingRect.topLeft().y(),
             )
 
         if SpriteImagesShown:
@@ -4993,10 +2328,10 @@ class SpriteItem(LevelEditorItem):
             # the size and position of the sprite in the level.
             # Measured in blocks.
             self.LevelRect = QtCore.QRectF(
-                unitedOffsetRect.topLeft().x() / TileWidth,
-                unitedOffsetRect.topLeft().y() / TileWidth,
-                unitedOffsetRect.width() / TileWidth,
-                unitedOffsetRect.height() / TileWidth,
+                unitedOffsetRect.topLeft().x() / tile.TileWidth,
+                unitedOffsetRect.topLeft().y() / tile.TileWidth,
+                unitedOffsetRect.width() / tile.TileWidth,
+                unitedOffsetRect.height() / tile.TileWidth,
                 )
 
             # BoundingRect: The sprite can only paint within
@@ -5007,13 +2342,13 @@ class SpriteItem(LevelEditorItem):
                 )
 
         else:
-            self.SelectionRect = QtCore.QRectF(0, 0, TileWidth, TileWidth)
+            self.SelectionRect = QtCore.QRectF(0, 0, tile.TileWidth, tile.TileWidth)
 
             self.LevelRect = QtCore.QRectF(
-                spriteboxOffsetRect.topLeft().x() / TileWidth,
-                spriteboxOffsetRect.topLeft().y() / TileWidth,
-                spriteboxOffsetRect.width() / TileWidth,
-                spriteboxOffsetRect.height() / TileWidth,
+                spriteboxOffsetRect.topLeft().x() / tile.TileWidth,
+                spriteboxOffsetRect.topLeft().y() / tile.TileWidth,
+                spriteboxOffsetRect.width() / tile.TileWidth,
+                spriteboxOffsetRect.height() / tile.TileWidth,
                 )
 
             # BoundingRect: The sprite can only paint within
@@ -5051,14 +2386,14 @@ class SpriteItem(LevelEditorItem):
         Makes sure positions don't go out of bounds and updates them as necessary
         """
 
-        tileWidthMult = TileWidth / 16
+        tile.TileWidthMult = tile.TileWidth / 16
         if change == QtWidgets.QGraphicsItem.ItemPositionChange:
             if self.scene() is None: return value
             if self.ChangingPos: return value
 
             if SpriteImagesShown:
-                xOffset, xOffsetAdjusted = self.ImageObj.xOffset, self.ImageObj.xOffset * tileWidthMult
-                yOffset, yOffsetAdjusted = self.ImageObj.yOffset, self.ImageObj.yOffset * tileWidthMult
+                xOffset, xOffsetAdjusted = self.ImageObj.xOffset, self.ImageObj.xOffset * tile.TileWidthMult
+                yOffset, yOffsetAdjusted = self.ImageObj.yOffset, self.ImageObj.yOffset * tile.TileWidthMult
             else:
                 xOffset, xOffsetAdjusted = 0, 0
                 yOffset, yOffsetAdjusted = 0, 0
@@ -5072,49 +2407,49 @@ class SpriteItem(LevelEditorItem):
                 objectsSelected = any([isinstance(thing, ObjectItem) for thing in mainWindow.CurrentSelection])
                 if QtWidgets.QApplication.keyboardModifiers() == Qt.AltModifier:
                     # Alt is held; don't snap
-                    newpos.setX((int((newpos.x() + 0.75) / tileWidthMult) * tileWidthMult))
-                    newpos.setY((int((newpos.y() + 0.75) / tileWidthMult) * tileWidthMult))
+                    newpos.setX((int((newpos.x() + 0.75) / tile.TileWidthMult) * tile.TileWidthMult))
+                    newpos.setY((int((newpos.y() + 0.75) / tile.TileWidthMult) * tile.TileWidthMult))
                 elif not objectsSelected and self.isSelected() and len(mainWindow.CurrentSelection) > 1:
                     # Snap to 8x8, but with the dragoffsets
                     dragoffsetx, dragoffsety = int(self.dragoffsetx), int(self.dragoffsety)
-                    if dragoffsetx < -(TileWidth / 2): dragoffsetx += TileWidth / 2
-                    if dragoffsety < -(TileWidth / 2): dragoffsety += TileWidth / 2
-                    if dragoffsetx == 0: dragoffsetx = -(TileWidth / 2)
-                    if dragoffsety == 0: dragoffsety = -(TileWidth / 2)
-                    referenceX = int((newpos.x() + (TileWidth / 4) + (TileWidth / 2) + dragoffsetx - xOffsetAdjusted) / (TileWidth / 2)) * (TileWidth / 2)
-                    referenceY = int((newpos.y() + (TileWidth / 4) + (TileWidth / 2) + dragoffsety - yOffsetAdjusted) / (TileWidth / 2)) * (TileWidth / 2)
-                    newpos.setX(referenceX - ((TileWidth / 2) + dragoffsetx) + xOffsetAdjusted)
-                    newpos.setY(referenceY - ((TileWidth / 2) + dragoffsety) + yOffsetAdjusted)
+                    if dragoffsetx < -(tile.TileWidth / 2): dragoffsetx += tile.TileWidth / 2
+                    if dragoffsety < -(tile.TileWidth / 2): dragoffsety += tile.TileWidth / 2
+                    if dragoffsetx == 0: dragoffsetx = -(tile.TileWidth / 2)
+                    if dragoffsety == 0: dragoffsety = -(tile.TileWidth / 2)
+                    referenceX = int((newpos.x() + (tile.TileWidth / 4) + (tile.TileWidth / 2) + dragoffsetx - xOffsetAdjusted) / (tile.TileWidth / 2)) * (tile.TileWidth / 2)
+                    referenceY = int((newpos.y() + (tile.TileWidth / 4) + (tile.TileWidth / 2) + dragoffsety - yOffsetAdjusted) / (tile.TileWidth / 2)) * (tile.TileWidth / 2)
+                    newpos.setX(referenceX - ((tile.TileWidth / 2) + dragoffsetx) + xOffsetAdjusted)
+                    newpos.setY(referenceY - ((tile.TileWidth / 2) + dragoffsety) + yOffsetAdjusted)
                 elif objectsSelected and self.isSelected():
                     # Objects are selected, too; move in sync by snapping to whole blocks
                     dragoffsetx, dragoffsety = int(self.dragoffsetx), int(self.dragoffsety)
-                    if dragoffsetx == 0: dragoffsetx = -TileWidth
-                    if dragoffsety == 0: dragoffsety = -TileWidth
-                    referenceX = int((newpos.x() + (TileWidth / 2) + TileWidth + dragoffsetx - xOffsetAdjusted) / TileWidth) * TileWidth
-                    referenceY = int((newpos.y() + (TileWidth / 2) + TileWidth + dragoffsety - yOffsetAdjusted) / TileWidth) * TileWidth
-                    newpos.setX(referenceX - (TileWidth + dragoffsetx) + xOffsetAdjusted)
-                    newpos.setY(referenceY - (TileWidth + dragoffsety) + yOffsetAdjusted)
+                    if dragoffsetx == 0: dragoffsetx = -tile.TileWidth
+                    if dragoffsety == 0: dragoffsety = -tile.TileWidth
+                    referenceX = int((newpos.x() + (tile.TileWidth / 2) + tile.TileWidth + dragoffsetx - xOffsetAdjusted) / tile.TileWidth) * tile.TileWidth
+                    referenceY = int((newpos.y() + (tile.TileWidth / 2) + tile.TileWidth + dragoffsety - yOffsetAdjusted) / tile.TileWidth) * tile.TileWidth
+                    newpos.setX(referenceX - (tile.TileWidth + dragoffsetx) + xOffsetAdjusted)
+                    newpos.setY(referenceY - (tile.TileWidth + dragoffsety) + yOffsetAdjusted)
                 else:
                     # Snap to 8x8
-                    newpos.setX(int(int((newpos.x() + (TileWidth / 4) - xOffsetAdjusted) / (TileWidth / 2)) * (TileWidth / 2) + xOffsetAdjusted))
-                    newpos.setY(int(int((newpos.y() + (TileWidth / 4) - yOffsetAdjusted) / (TileWidth / 2)) * (TileWidth / 2) + yOffsetAdjusted))
+                    newpos.setX(int(int((newpos.x() + (tile.TileWidth / 4) - xOffsetAdjusted) / (tile.TileWidth / 2)) * (tile.TileWidth / 2) + xOffsetAdjusted))
+                    newpos.setY(int(int((newpos.y() + (tile.TileWidth / 4) - yOffsetAdjusted) / (tile.TileWidth / 2)) * (tile.TileWidth / 2) + yOffsetAdjusted))
 
             x = newpos.x()
             y = newpos.y()
 
             # don't let it get out of the boundaries
             if x < 0: newpos.setX(0)
-            if x > 1023 * TileWidth: newpos.setX(1023 * TileWidth)
+            if x > 1023 * tile.TileWidth: newpos.setX(1023 * tile.TileWidth)
             if y < 0: newpos.setY(0)
-            if y > 511 * TileWidth: newpos.setY(511 * TileWidth)
+            if y > 511 * tile.TileWidth: newpos.setY(511 * tile.TileWidth)
 
             # update the data
-            x = int(newpos.x() / tileWidthMult - xOffset)
-            y = int(newpos.y() / tileWidthMult - yOffset)
+            x = int(newpos.x() / tile.TileWidthMult - xOffset)
+            y = int(newpos.y() / tile.TileWidthMult - yOffset)
 
             if x != self.objx or y != self.objy:
                 #oldrect = self.BoundingRect
-                #oldrect.translate(self.objx*(TileWidth/16), self.objy*(TileWidth/16))
+                #oldrect.translate(self.objx*(tile.TileWidth/16), self.objy*(tile.TileWidth/16))
                 updRect = QtCore.QRectF(self.x(), self.y(), self.BoundingRect.width(), self.BoundingRect.height())
                 #self.scene().update(updRect.united(oldrect))
                 self.scene().update(updRect)
@@ -5208,7 +2543,7 @@ class SpriteItem(LevelEditorItem):
 
         # Default spritebox
         drawSpritebox = True
-        spriteboxRect = QtCore.QRectF(1, 1, TileWidth - 2, TileWidth - 2)
+        spriteboxRect = QtCore.QRectF(1, 1, tile.TileWidth - 2, tile.TileWidth - 2)
 
         if SpriteImagesShown or overrideGlobals:
             self.ImageObj.paint(painter)
@@ -5229,10 +2564,10 @@ class SpriteItem(LevelEditorItem):
         if drawSpritebox:
             if self.isSelected():
                 painter.setBrush(QtGui.QBrush(theme.color('spritebox_fill_s')))
-                painter.setPen(QtGui.QPen(theme.color('spritebox_lines_s'), 1 / 24 * TileWidth))
+                painter.setPen(QtGui.QPen(theme.color('spritebox_lines_s'), 1 / 24 * tile.TileWidth))
             else:
                 painter.setBrush(QtGui.QBrush(theme.color('spritebox_fill')))
-                painter.setPen(QtGui.QPen(theme.color('spritebox_lines'), 1 / 24 * TileWidth))
+                painter.setPen(QtGui.QPen(theme.color('spritebox_lines'), 1 / 24 * tile.TileWidth))
             painter.drawRoundedRect(spriteboxRect, 4, 4)
 
             painter.setFont(self.font)
@@ -5263,15 +2598,15 @@ class EntranceItem(LevelEditorItem):
     """
     Level editor item that represents an entrance
     """
-    BoundingRect = QtCore.QRectF(0, 0, TileWidth, TileWidth)
-    RoundedRect = QtCore.QRectF(1 / 24 * TileWidth, 1 / 24 * TileWidth, TileWidth - 1 / 24 * TileWidth, TileWidth - 1 / 24 * TileWidth)
+    BoundingRect = QtCore.QRectF(0, 0, tile.TileWidth, tile.TileWidth)
+    RoundedRect = QtCore.QRectF(1 / 24 * tile.TileWidth, 1 / 24 * tile.TileWidth, tile.TileWidth - 1 / 24 * tile.TileWidth, tile.TileWidth - 1 / 24 * tile.TileWidth)
     EntranceImages = None
 
     class AuxEntranceItem(QtWidgets.QGraphicsItem):
         """
         Auxiliary item for drawing entrance things
         """
-        BoundingRect = QtCore.QRectF(0, 0, TileWidth, TileWidth)
+        BoundingRect = QtCore.QRectF(0, 0, tile.TileWidth, tile.TileWidth)
         def __init__(self, parent):
             """
             Initializes the auxiliary entrance thing
@@ -5290,19 +2625,19 @@ class EntranceItem(LevelEditorItem):
             """
             if self.parent.enttype == 20:
                 # Jumping facing right
-                self.setPos(0, -11.5 * TileWidth)
-                self.BoundingRect = QtCore.QRectF(0, 0, 4.0833333 * TileWidth, 12.5 * TileWidth)
+                self.setPos(0, -11.5 * tile.TileWidth)
+                self.BoundingRect = QtCore.QRectF(0, 0, 4.0833333 * tile.TileWidth, 12.5 * tile.TileWidth)
             elif self.parent.enttype == 21:
                 # Vine
-                self.setPos(-0.5 * TileWidth, -10 * TileWidth)
-                self.BoundingRect = QtCore.QRectF(0, 0, 2 * TileWidth, 29 * TileWidth)
+                self.setPos(-0.5 * tile.TileWidth, -10 * tile.TileWidth)
+                self.BoundingRect = QtCore.QRectF(0, 0, 2 * tile.TileWidth, 29 * tile.TileWidth)
             elif self.parent.enttype == 24:
                 # Jumping facing left
-                self.setPos(-3.0833333 * TileWidth, -11.5 * TileWidth)
-                self.BoundingRect = QtCore.QRectF(0, 0, 4.0833333 * TileWidth, 12.5 * TileWidth)
+                self.setPos(-3.0833333 * tile.TileWidth, -11.5 * tile.TileWidth)
+                self.BoundingRect = QtCore.QRectF(0, 0, 4.0833333 * tile.TileWidth, 12.5 * tile.TileWidth)
             else:
                 self.setPos(0, 0)
-                self.BoundingRect = QtCore.QRectF(0, 0, TileWidth, TileWidth)
+                self.BoundingRect = QtCore.QRectF(0, 0, tile.TileWidth, tile.TileWidth)
 
         def paint(self, painter, option, widget):
             """
@@ -5315,9 +2650,9 @@ class EntranceItem(LevelEditorItem):
             if self.parent.enttype == 20:
                 # Jumping facing right
 
-                path = QtGui.QPainterPath(QtCore.QPoint(TileWidth / 2, 11.5 * TileWidth))
-                path.cubicTo(QtCore.QPoint(TileWidth * 5 / 3, -TileWidth), QtCore.QPoint(2.0833333 * TileWidth, -TileWidth), QtCore.QPoint(2.5 * TileWidth, TileWidth * 3 / 2))
-                path.lineTo(QtCore.QPoint(4 * TileWidth, 12.5 * TileWidth))
+                path = QtGui.QPainterPath(QtCore.QPoint(tile.TileWidth / 2, 11.5 * tile.TileWidth))
+                path.cubicTo(QtCore.QPoint(tile.TileWidth * 5 / 3, -tile.TileWidth), QtCore.QPoint(2.0833333 * tile.TileWidth, -tile.TileWidth), QtCore.QPoint(2.5 * tile.TileWidth, tile.TileWidth * 3 / 2))
+                path.lineTo(QtCore.QPoint(4 * tile.TileWidth, 12.5 * tile.TileWidth))
 
                 painter.setPen(SLib.OutlinePen)
                 painter.drawPath(path)
@@ -5328,19 +2663,19 @@ class EntranceItem(LevelEditorItem):
                 # Draw the top half
                 painter.setOpacity(1)
                 painter.drawPixmap(0, 0, SLib.ImageCache['VineTop'])
-                painter.drawTiledPixmap(TileWidth // 2, TileWidth * 2, TileWidth, 7 * TileWidth, SLib.ImageCache['VineMid'])
+                painter.drawTiledPixmap(tile.TileWidth // 2, tile.TileWidth * 2, tile.TileWidth, 7 * tile.TileWidth, SLib.ImageCache['VineMid'])
                 # Draw the bottom half
                 # This is semi-transparent because you can't interact with it.
                 painter.setOpacity(0.5)
-                painter.drawTiledPixmap(TileWidth // 2, TileWidth * 9, TileWidth, 19 * TileWidth, SLib.ImageCache['VineMid'])
-                painter.drawPixmap(TileWidth // 2, 28 * TileWidth, SLib.ImageCache['VineBtm'])
+                painter.drawTiledPixmap(tile.TileWidth // 2, tile.TileWidth * 9, tile.TileWidth, 19 * tile.TileWidth, SLib.ImageCache['VineMid'])
+                painter.drawPixmap(tile.TileWidth // 2, 28 * tile.TileWidth, SLib.ImageCache['VineBtm'])
 
             elif self.parent.enttype == 24:
                 # Jumping facing left
 
-                path = QtGui.QPainterPath(QtCore.QPoint(3.5833333 * TileWidth, 11.5 * TileWidth))
-                path.cubicTo(QtCore.QPoint(2.41666666 * TileWidth, -TileWidth), QtCore.QPoint(TileWidth / 2, -TileWidth), QtCore.QPoint(1.58333333 * TileWidth, TileWidth * 3 / 2))
-                path.lineTo(QtCore.QPoint(TileWidth / 12, TileWidth * 12.5))
+                path = QtGui.QPainterPath(QtCore.QPoint(3.5833333 * tile.TileWidth, 11.5 * tile.TileWidth))
+                path.cubicTo(QtCore.QPoint(2.41666666 * tile.TileWidth, -tile.TileWidth), QtCore.QPoint(tile.TileWidth / 2, -tile.TileWidth), QtCore.QPoint(1.58333333 * tile.TileWidth, tile.TileWidth * 3 / 2))
+                path.lineTo(QtCore.QPoint(tile.TileWidth / 12, tile.TileWidth * 12.5))
 
                 painter.setPen(SLib.OutlinePen)
                 painter.drawPath(path)
@@ -5359,7 +2694,7 @@ class EntranceItem(LevelEditorItem):
             ei = []
             src = QtGui.QPixmap('reggiedata/entrances.png')
             for i in range(18):
-                ei.append(src.copy(i * TileWidth, 0, TileWidth, TileWidth))
+                ei.append(src.copy(i * tile.TileWidth, 0, tile.TileWidth, tile.TileWidth))
             EntranceItem.EntranceImages = ei
 
         LevelEditorItem.__init__(self)
@@ -5394,7 +2729,7 @@ class EntranceItem(LevelEditorItem):
 
         global DirtyOverride
         DirtyOverride += 1
-        self.setPos(int(x * TileWidth / 16), int(y * TileWidth / 16))
+        self.setPos(int(x * tile.TileWidth / 16), int(y * tile.TileWidth / 16))
         DirtyOverride -= 1
 
         self.aux = self.AuxEntranceItem(self)
@@ -5459,8 +2794,8 @@ class EntranceItem(LevelEditorItem):
             h = 2
 
         # Now make the rects
-        self.RoundedRect = QtCore.QRectF((x * TileWidth) + 1 / 24 * TileWidth, (y * TileWidth) + 1 / 24 * TileWidth, (w * TileWidth) - 2 / 24 * TileWidth, (h * TileWidth) - 2 / 24 * TileWidth)
-        self.BoundingRect = QtCore.QRectF(x * TileWidth, y * TileWidth, w * TileWidth, h * TileWidth)
+        self.RoundedRect = QtCore.QRectF((x * tile.TileWidth) + 1 / 24 * tile.TileWidth, (y * tile.TileWidth) + 1 / 24 * tile.TileWidth, (w * tile.TileWidth) - 2 / 24 * tile.TileWidth, (h * tile.TileWidth) - 2 / 24 * tile.TileWidth)
+        self.BoundingRect = QtCore.QRectF(x * tile.TileWidth, y * tile.TileWidth, w * tile.TileWidth, h * tile.TileWidth)
 
         # Update the aux thing
         self.aux.TypeChange()
@@ -5476,10 +2811,10 @@ class EntranceItem(LevelEditorItem):
 
         if self.isSelected():
             painter.setBrush(QtGui.QBrush(theme.color('entrance_fill_s')))
-            painter.setPen(QtGui.QPen(theme.color('entrance_lines_s'), 1 / 24 * TileWidth))
+            painter.setPen(QtGui.QPen(theme.color('entrance_lines_s'), 1 / 24 * tile.TileWidth))
         else:
             painter.setBrush(QtGui.QBrush(theme.color('entrance_fill')))
-            painter.setPen(QtGui.QPen(theme.color('entrance_lines'), 1 / 24 * TileWidth))
+            painter.setPen(QtGui.QPen(theme.color('entrance_lines'), 1 / 24 * tile.TileWidth))
 
         self.TypeChange()
         painter.drawRoundedRect(self.RoundedRect, 4, 4)
@@ -5508,8 +2843,8 @@ class EntranceItem(LevelEditorItem):
         painter.drawPixmap(0, 0, EntranceItem.EntranceImages[icontype])
 
         painter.setFont(self.font)
-        margin = TileWidth / 10
-        painter.drawText(QtCore.QRectF(margin, margin, TileWidth / 2 - margin, TileWidth / 2 - margin), Qt.AlignCenter, str(self.entid))
+        margin = tile.TileWidth / 10
+        painter.drawText(QtCore.QRectF(margin, margin, tile.TileWidth / 2 - margin, tile.TileWidth / 2 - margin), Qt.AlignCenter, str(self.entid))
 
     def delete(self):
         """
@@ -5564,9 +2899,9 @@ class PathItem(LevelEditorItem):
     """
     Level editor item that represents a path node
     """
-    BoundingRect = QtCore.QRectF(0, 0, TileWidth, TileWidth)
-    SelectionRect = QtCore.QRectF(0, 0, TileWidth - 1 / 24 * TileWidth, TileWidth - 1 / 24 * TileWidth)
-    RoundedRect = QtCore.QRectF(1 / 24 * TileWidth, 1 / 24 * TileWidth, TileWidth - 2 / 24 * TileWidth, TileWidth - 2 / 24 * TileWidth)
+    BoundingRect = QtCore.QRectF(0, 0, tile.TileWidth, tile.TileWidth)
+    SelectionRect = QtCore.QRectF(0, 0, tile.TileWidth - 1 / 24 * tile.TileWidth, tile.TileWidth - 1 / 24 * tile.TileWidth)
+    RoundedRect = QtCore.QRectF(1 / 24 * tile.TileWidth, 1 / 24 * tile.TileWidth, tile.TileWidth - 2 / 24 * tile.TileWidth, tile.TileWidth - 2 / 24 * tile.TileWidth)
 
 
     def __init__(self, objx, objy, pathinfo, nodeinfo):
@@ -5585,13 +2920,13 @@ class PathItem(LevelEditorItem):
         self.pathinfo = pathinfo
         self.nodeinfo = nodeinfo
         self.listitem = None
-        self.LevelRect = (QtCore.QRectF(self.objx/16, self.objy/16, TileWidth/16, TileWidth/16))
+        self.LevelRect = (QtCore.QRectF(self.objx/16, self.objy/16, tile.TileWidth/16, tile.TileWidth/16))
         self.setFlag(self.ItemIsMovable, not PathsFrozen)
         self.setFlag(self.ItemIsSelectable, not PathsFrozen)
 
         global DirtyOverride
         DirtyOverride += 1
-        self.setPos(int(objx * TileWidth / 16), int(objy * TileWidth / 16))
+        self.setPos(int(objx * tile.TileWidth / 16), int(objy * tile.TileWidth / 16))
         DirtyOverride -= 1
 
         self.setZValue(25002)
@@ -5646,18 +2981,18 @@ class PathItem(LevelEditorItem):
 
         if self.isSelected():
             painter.setBrush(QtGui.QBrush(theme.color('path_fill_s')))
-            painter.setPen(QtGui.QPen(theme.color('path_lines_s'), 1 / 24 * TileWidth))
+            painter.setPen(QtGui.QPen(theme.color('path_lines_s'), 1 / 24 * tile.TileWidth))
         else:
             painter.setBrush(QtGui.QBrush(theme.color('path_fill')))
-            painter.setPen(QtGui.QPen(theme.color('path_lines'), 1 / 24 * TileWidth))
+            painter.setPen(QtGui.QPen(theme.color('path_lines'), 1 / 24 * tile.TileWidth))
         painter.drawRoundedRect(self.RoundedRect, 4, 4)
 
         icontype = 0
 
         painter.setFont(self.font)
-        margin = TileWidth / 10
-        painter.drawText(QtCore.QRectF(margin, margin, TileWidth / 2 - margin, TileWidth / 2 - margin), Qt.AlignCenter, str(self.pathid))
-        painter.drawText(QtCore.QRectF(margin, TileWidth / 2, TileWidth / 2 - margin, TileWidth / 2 - margin), Qt.AlignCenter, str(self.nodeid))
+        margin = tile.TileWidth / 10
+        painter.drawText(QtCore.QRectF(margin, margin, tile.TileWidth / 2 - margin, tile.TileWidth / 2 - margin), Qt.AlignCenter, str(self.pathid))
+        painter.drawText(QtCore.QRectF(margin, tile.TileWidth / 2, tile.TileWidth / 2 - margin, tile.TileWidth / 2 - margin), Qt.AlignCenter, str(self.nodeid))
 
     def delete(self):
         """
@@ -5733,11 +3068,11 @@ class PathEditorLineItem(LevelEditorItem):
         self.objx = (min(xcoords) - 4)
         self.objy = (min(ycoords) - 4)
 
-        mywidth = (8 + (max(xcoords) - self.objx)) * (TileWidth/16)
-        myheight = (8 + (max(ycoords) - self.objy)) * (TileWidth/16)
+        mywidth = (8 + (max(xcoords) - self.objx)) * (tile.TileWidth/16)
+        myheight = (8 + (max(ycoords) - self.objy)) * (tile.TileWidth/16)
         global DirtyOverride
         DirtyOverride += 1
-        self.setPos(self.objx * (TileWidth/16), self.objy * (TileWidth/16))
+        self.setPos(self.objx * (tile.TileWidth/16), self.objy * (tile.TileWidth/16))
         DirtyOverride -= 1
         self.prepareGeometryChange()
         self.BoundingRect = QtCore.QRectF(-4, -4, mywidth, myheight)
@@ -5755,7 +3090,7 @@ class PathEditorLineItem(LevelEditorItem):
 
         color = theme.color('path_connector')
         painter.setBrush(QtGui.QBrush(color))
-        painter.setPen(QtGui.QPen(color, 3 * TileWidth / 24, join = Qt.RoundJoin, cap = Qt.RoundCap))
+        painter.setPen(QtGui.QPen(color, 3 * tile.TileWidth / 24, join = Qt.RoundJoin, cap = Qt.RoundCap))
         ppath = QtGui.QPainterPath()
 
         lines = []
@@ -5763,7 +3098,7 @@ class PathEditorLineItem(LevelEditorItem):
         firstn = True
 
         snl = self.nodelist
-        mult = TileWidth / 16
+        mult = tile.TileWidth / 16
         for j, node in enumerate(snl):
             if ((j + 1) < len(snl)):
                 a = QtCore.QPointF(float(snl[j]['x'] * mult) - self.x(), float(snl[j]['y'] * mult) - self.y())
@@ -5789,9 +3124,9 @@ class ProgressPathItem(LevelEditorItem):
     """
     Level editor item that represents a progress path node
     """
-    BoundingRect = QtCore.QRectF(0, 0, TileWidth, TileWidth)
-    SelectionRect = QtCore.QRectF(0, 0, TileWidth - 1 / 24 * TileWidth, TileWidth - 1 / 24 * TileWidth)
-    RoundedRect = QtCore.QRectF(1 / 24 * TileWidth, 1 / 24 * TileWidth, TileWidth - 2 / 24 * TileWidth, TileWidth - 2 / 24 * TileWidth)
+    BoundingRect = QtCore.QRectF(0, 0, tile.TileWidth, tile.TileWidth)
+    SelectionRect = QtCore.QRectF(0, 0, tile.TileWidth - 1 / 24 * tile.TileWidth, tile.TileWidth - 1 / 24 * tile.TileWidth)
+    RoundedRect = QtCore.QRectF(1 / 24 * tile.TileWidth, 1 / 24 * tile.TileWidth, tile.TileWidth - 2 / 24 * tile.TileWidth, tile.TileWidth - 2 / 24 * tile.TileWidth)
 
 
     def __init__(self, objx, objy, progpathinfo, nodeinfo):
@@ -5810,13 +3145,13 @@ class ProgressPathItem(LevelEditorItem):
         self.progpathinfo = progpathinfo
         self.nodeinfo = nodeinfo
         self.listitem = None
-        self.LevelRect = (QtCore.QRectF(self.objx / 16, self.objy / 16, TileWidth / 16, TileWidth / 16))
+        self.LevelRect = (QtCore.QRectF(self.objx / 16, self.objy / 16, tile.TileWidth / 16, tile.TileWidth / 16))
         self.setFlag(self.ItemIsMovable, not ProgressPathsFrozen)
         self.setFlag(self.ItemIsSelectable, not ProgressPathsFrozen)
 
         global DirtyOverride
         DirtyOverride += 1
-        self.setPos(int(objx * TileWidth / 16), int(objy * TileWidth / 16))
+        self.setPos(int(objx * tile.TileWidth / 16), int(objy * tile.TileWidth / 16))
         DirtyOverride -= 1
 
         self.setZValue(25002)
@@ -5873,18 +3208,18 @@ class ProgressPathItem(LevelEditorItem):
 
         if self.isSelected():
             painter.setBrush(QtGui.QBrush(theme.color('progpath_fill_s')))
-            painter.setPen(QtGui.QPen(theme.color('progpath_lines_s'), 1 / 24 * TileWidth))
+            painter.setPen(QtGui.QPen(theme.color('progpath_lines_s'), 1 / 24 * tile.TileWidth))
         else:
             painter.setBrush(QtGui.QBrush(theme.color('progpath_fill')))
-            painter.setPen(QtGui.QPen(theme.color('progpath_lines'), 1 / 24 * TileWidth))
+            painter.setPen(QtGui.QPen(theme.color('progpath_lines'), 1 / 24 * tile.TileWidth))
         painter.drawRoundedRect(self.RoundedRect, 4, 4)
 
         painter.setFont(self.font)
         pathTxt = trans.string('ProgPaths', (1 if self.progpathinfo['altpath'] else 0), '[id]', self.progpathid)
         painter.setFont(self.font)
-        margin = TileWidth / 10
-        painter.drawText(QtCore.QRectF(margin, margin, TileWidth / 2 - margin, TileWidth / 2 - margin), Qt.AlignCenter, pathTxt)
-        painter.drawText(QtCore.QRectF(margin, TileWidth / 2, TileWidth / 2 - margin, TileWidth / 2 - margin), Qt.AlignCenter, str(self.nodeid))
+        margin = tile.TileWidth / 10
+        painter.drawText(QtCore.QRectF(margin, margin, tile.TileWidth / 2 - margin, tile.TileWidth / 2 - margin), Qt.AlignCenter, pathTxt)
+        painter.drawText(QtCore.QRectF(margin, tile.TileWidth / 2, tile.TileWidth / 2 - margin, tile.TileWidth / 2 - margin), Qt.AlignCenter, str(self.nodeid))
 
     def delete(self):
         """
@@ -5960,11 +3295,11 @@ class ProgressPathEditorLineItem(LevelEditorItem):
         self.objx = (min(xcoords) - 4)
         self.objy = (min(ycoords) - 4)
 
-        mywidth = (8 + (max(xcoords) - self.objx)) * (TileWidth/16)
-        myheight = (8 + (max(ycoords) - self.objy)) * (TileWidth/16)
+        mywidth = (8 + (max(xcoords) - self.objx)) * (tile.TileWidth/16)
+        myheight = (8 + (max(ycoords) - self.objy)) * (tile.TileWidth/16)
         global DirtyOverride
         DirtyOverride += 1
-        self.setPos(self.objx * (TileWidth/16), self.objy * (TileWidth/16))
+        self.setPos(self.objx * (tile.TileWidth/16), self.objy * (tile.TileWidth/16))
         DirtyOverride -= 1
         self.prepareGeometryChange()
         self.BoundingRect = QtCore.QRectF(-4, -4, mywidth, myheight)
@@ -5981,7 +3316,7 @@ class ProgressPathEditorLineItem(LevelEditorItem):
         painter.setClipRect(option.exposedRect)
         color = theme.color('progpath_connector')
         painter.setBrush(QtGui.QBrush(color))
-        painter.setPen(QtGui.QPen(color, 3 * TileWidth / 24, join = Qt.RoundJoin, cap = Qt.RoundCap))
+        painter.setPen(QtGui.QPen(color, 3 * tile.TileWidth / 24, join = Qt.RoundJoin, cap = Qt.RoundCap))
         ppath = QtGui.QPainterPath()
 
         lines = []
@@ -5989,7 +3324,7 @@ class ProgressPathEditorLineItem(LevelEditorItem):
         firstn = True
 
         snl = self.nodelist
-        mult = TileWidth / 16
+        mult = tile.TileWidth / 16
         for j, node in enumerate(snl):
             if ((j + 1) < len(snl)):
                 a = QtCore.QPointF(float(snl[j]['x'] * mult) - self.x(), float(snl[j]['y'] * mult) - self.y())
@@ -6015,9 +3350,9 @@ class CommentItem(LevelEditorItem):
     """
     Level editor item that represents a in-level comment
     """
-    BoundingRect = QtCore.QRectF(-8 * TileWidth / 24, -8 * TileWidth / 24, 48 * TileWidth / 24, 48 * TileWidth / 24)
-    SelectionRect = QtCore.QRectF(-4 * TileWidth / 24, -4 * TileWidth / 24, 4 * TileWidth / 24, 4 * TileWidth / 24)
-    Circle = QtCore.QRectF(0, 0, 32 * TileWidth / 24, 32 * TileWidth / 24)
+    BoundingRect = QtCore.QRectF(-8 * tile.TileWidth / 24, -8 * tile.TileWidth / 24, 48 * tile.TileWidth / 24, 48 * tile.TileWidth / 24)
+    SelectionRect = QtCore.QRectF(-4 * tile.TileWidth / 24, -4 * tile.TileWidth / 24, 4 * tile.TileWidth / 24, 4 * tile.TileWidth / 24)
+    Circle = QtCore.QRectF(0, 0, 32 * tile.TileWidth / 24, 32 * tile.TileWidth / 24)
 
     def __init__(self, x, y, text=''):
         """
@@ -6039,7 +3374,7 @@ class CommentItem(LevelEditorItem):
 
         global DirtyOverride
         DirtyOverride += 1
-        self.setPos(int(x * TileWidth / 16), int(y * TileWidth / 16))
+        self.setPos(int(x * tile.TileWidth / 16), int(y * tile.TileWidth / 16))
         DirtyOverride -= 1
 
         self.setZValue(zval + 1)
@@ -6049,10 +3384,10 @@ class CommentItem(LevelEditorItem):
         self.TextEditProxy = mainWindow.scene.addWidget(self.TextEdit)
         self.TextEditProxy.setZValue(self.zval)
         self.TextEditProxy.setCursor(Qt.IBeamCursor)
-        self.TextEditProxy.boundingRect = lambda self: QtCore.QRectF(0, 0, 100 * TileWidth, 100 * TileWidth)
+        self.TextEditProxy.boundingRect = lambda self: QtCore.QRectF(0, 0, 100 * tile.TileWidth, 100 * tile.TileWidth)
         self.TextEdit.setVisible(False)
-        self.TextEdit.setMaximumWidth(192 * TileWidth / 24)
-        self.TextEdit.setMaximumHeight(128 * TileWidth / 24)
+        self.TextEdit.setMaximumWidth(192 * tile.TileWidth / 24)
+        self.TextEdit.setMaximumHeight(128 * tile.TileWidth / 24)
         self.TextEdit.setPlainText(self.text)
         self.TextEdit.textChanged.connect(self.handleTextChanged)
         self.reposTextEdit()
@@ -6102,17 +3437,17 @@ class CommentItem(LevelEditorItem):
         if self.isSelected():
             painter.setBrush(QtGui.QBrush(theme.color('comment_fill_s')))
             p = QtGui.QPen(theme.color('comment_lines_s'))
-            p.setWidth(3 * TileWidth / 24)
+            p.setWidth(3 * tile.TileWidth / 24)
             painter.setPen(p)
         else:
             painter.setBrush(QtGui.QBrush(theme.color('comment_fill')))
             p = QtGui.QPen(theme.color('comment_lines'))
-            p.setWidth(3 * TileWidth / 24)
+            p.setWidth(3 * tile.TileWidth / 24)
             painter.setPen(p)
 
         painter.drawEllipse(self.Circle)
         if not self.isSelected(): painter.setOpacity(.5)
-        painter.drawPixmap(4 * TileWidth / 24, 4 * TileWidth / 24, GetIcon('comments', 24).pixmap(TileWidth, TileWidth))
+        painter.drawPixmap(4 * tile.TileWidth / 24, 4 * tile.TileWidth / 24, GetIcon('comments', 24).pixmap(tile.TileWidth, tile.TileWidth))
         painter.setOpacity(1)
 
 
@@ -6127,10 +3462,10 @@ class CommentItem(LevelEditorItem):
             self.TextEditProxy = mainWindow.scene.addWidget(self.TextEdit)
             self.TextEditProxy.setZValue(self.zval)
             self.TextEditProxy.setCursor(Qt.IBeamCursor)
-            self.TextEditProxy.BoundingRect = QtCore.QRectF(0, 0, 100 * TileWidth, 100 * TileWidth)
+            self.TextEditProxy.BoundingRect = QtCore.QRectF(0, 0, 100 * tile.TileWidth, 100 * tile.TileWidth)
             self.TextEditProxy.boundingRect = lambda self: self.BoundingRect
-            self.TextEdit.setMaximumWidth(192 * TileWidth / 24)
-            self.TextEdit.setMaximumHeight(128 * TileWidth / 24)
+            self.TextEdit.setMaximumWidth(192 * tile.TileWidth / 24)
+            self.TextEdit.setMaximumHeight(128 * tile.TileWidth / 24)
             self.TextEdit.setPlainText(self.text)
             self.TextEdit.textChanged.connect(self.handleTextChanged)
             self.reposTextEdit()
@@ -6147,7 +3482,7 @@ class CommentItem(LevelEditorItem):
         """
         Repositions the text edit
         """
-        self.TextEditProxy.setPos((self.objx * 3/2) + TileWidth, (self.objy * 3/2) + TileWidth * 2 / 3)
+        self.TextEditProxy.setPos((self.objx * 3/2) + tile.TileWidth, (self.objy * 3/2) + tile.TileWidth * 2 / 3)
 
     def handlePosChange(self, oldx, oldy):
         """
@@ -6156,10 +3491,10 @@ class CommentItem(LevelEditorItem):
         self.reposTextEdit()
 
         # Manual scene update :(
-        w = 8 * TileWidth + TileWidth
-        h = 16 / 3 * TileWidth + TileWidth
-        oldx *= TileWidth / 16
-        oldy *= TileWidth / 16
+        w = 8 * tile.TileWidth + tile.TileWidth
+        h = 16 / 3 * tile.TileWidth + tile.TileWidth
+        oldx *= tile.TileWidth / 16
+        oldy *= tile.TileWidth / 16
         oldRect = QtCore.QRectF(oldx, oldy, w, h)
         self.scene().update(oldRect)
 
@@ -6232,7 +3567,7 @@ class LevelOverviewWidget(QtWidgets.QWidget):
         """
         Calculates all the required sizes for this scale
         """
-        self.posmult = TileWidth / self.scale
+        self.posmult = tile.TileWidth / self.scale
 
     def mouseMoveEvent(self, event):
         """
@@ -6344,7 +3679,7 @@ class LevelOverviewWidget(QtWidgets.QWidget):
 
         b = self.locationbrush
         painter.setPen(QtGui.QPen(theme.color('overview_viewbox'), 1))
-        painter.drawRect(self.Xposlocator/TileWidth/self.mainWindowScale, self.Yposlocator/TileWidth/self.mainWindowScale, self.Wlocator/TileWidth/self.mainWindowScale, self.Hlocator/TileWidth/self.mainWindowScale)
+        painter.drawRect(self.Xposlocator/tile.TileWidth/self.mainWindowScale, self.Yposlocator/tile.TileWidth/self.mainWindowScale, self.Wlocator/tile.TileWidth/self.mainWindowScale, self.Hlocator/tile.TileWidth/self.mainWindowScale)
 
 
     def Rescale(self):
@@ -6465,8 +3800,8 @@ class ObjectPickerWidget(QtWidgets.QListView):
                 # progressive-tileset-loading thread. It will
                 # go away on its own, but we still need to handle
                 # this.
-                return QtCore.QSize(TileWidth, TileWidth)
-            return m.data(index, Qt.UserRole) or QtCore.QSize(TileWidth, TileWidth)
+                return QtCore.QSize(tile.TileWidth, tile.TileWidth)
+            return m.data(index, Qt.UserRole) or QtCore.QSize(tile.TileWidth, tile.TileWidth)
 
 
     class ObjectListModel(QtCore.QAbstractListModel):
@@ -6483,9 +3818,9 @@ class ObjectPickerWidget(QtWidgets.QListView):
             self.itemsize = []
             QtCore.QAbstractListModel.__init__(self)
 
-            #for i in range(256):
-            #    self.items.append(None)
-            #    self.ritems.append(None)
+            for i in range(256):
+                self.items.append(None)
+                self.ritems.append(None)
 
         def rowCount(self, parent=None):
             """
@@ -6502,7 +3837,7 @@ class ObjectPickerWidget(QtWidgets.QListView):
             if n < 0: return None
             if n >= len(self.items): return None
 
-            if role == Qt.DecorationRole:
+            if role == Qt.DecorationRole and n < len(self.ritems):
                 return self.ritems[n]
 
             if role == Qt.BackgroundRole:
@@ -6521,7 +3856,7 @@ class ObjectPickerWidget(QtWidgets.QListView):
             Renders all the object previews for the model
             """
             if ObjectDefinitions[idx] is None: return
-            forcedTileWidth = 32
+            forcedtile.TileWidth = 32
 
             self.beginResetModel()
 
@@ -6536,7 +3871,7 @@ class ObjectPickerWidget(QtWidgets.QListView):
                 obj = RenderObject(idx, i, defs[i].width, defs[i].height, True)
                 self.items.append(obj)
 
-                pm = QtGui.QPixmap(defs[i].width * TileWidth, defs[i].height * TileWidth)
+                pm = QtGui.QPixmap(defs[i].width * tile.TileWidth, defs[i].height * tile.TileWidth)
                 pm.fill(Qt.transparent)
                 p = QtGui.QPainter()
                 p.begin(pm)
@@ -6556,13 +3891,13 @@ class ObjectPickerWidget(QtWidgets.QListView):
                             else:
                                 p.drawPixmap(x, y, Tiles[tile].main)
                             if isinstance(Tiles[tile], TilesetTile) and Tiles[tile].isAnimated: isAnim = True
-                        x += TileWidth
-                    y += TileWidth
+                        x += tile.TileWidth
+                    y += tile.TileWidth
                 p.end()
-                pm = pm.scaledToWidth(pm.width() * forcedTileWidth / TileWidth, Qt.SmoothTransformation) # force tile widths to 24x24
+                pm = pm.scaledToWidth(pm.width() * forcedtile.TileWidth / tile.TileWidth, Qt.SmoothTransformation) # force tile widths to 24x24
 
                 self.ritems.append(pm)
-                self.itemsize.append(QtCore.QSize(defs[i].width * forcedTileWidth + 4, defs[i].height * forcedTileWidth + 4))
+                self.itemsize.append(QtCore.QSize(defs[i].width * forcedtile.TileWidth + 4, defs[i].height * forcedtile.TileWidth + 4))
                 if (idx == 0) and (i in ObjDesc) and isAnim:
                     self.tooltips.append(trans.string('Objects', 4, '[id]', i, '[desc]', ObjDesc[i]))
                 elif (idx == 0) and (i in ObjDesc):
@@ -6799,30 +4134,30 @@ class Stamp():
         # Go through the objects and find the maxs and mins
         for layer in layers:
             for obj in layer:
-                x1 = (obj.objx * TileWidth)
-                x2 = x1 + (obj.width * TileWidth)
-                y1 = (obj.objy * TileWidth)
-                y2 = y1 + (obj.height * TileWidth)
+                x1 = (obj.objx * tile.TileWidth)
+                x2 = x1 + (obj.width * tile.TileWidth)
+                y1 = (obj.objy * tile.TileWidth)
+                y2 = y1 + (obj.height * tile.TileWidth)
 
                 if x1 < minX: minX = x1
                 if x2 > maxX: maxX = x2
                 if y1 < minY: minY = y1
                 if y2 > maxY: maxY = y2
 
-        # Calculate offset amounts (snap to TileWidthxTileWidth increments)
-        offsetX = int(minX // TileWidth) * TileWidth
-        offsetY = int(minY // TileWidth) * TileWidth
+        # Calculate offset amounts (snap to tile.TileWidthxtile.TileWidth increments)
+        offsetX = int(minX // tile.TileWidth) * tile.TileWidth
+        offsetY = int(minY // tile.TileWidth) * tile.TileWidth
         drawOffsetX = offsetX - minX
         drawOffsetY = offsetY - minY
 
         # Go through the things again and shift them by the offset amount
         for spr in sprites:
-            spr.objx -= offsetX / TileWidth / 16
-            spr.objy -= offsetY / TileWidth / 16
+            spr.objx -= offsetX / tile.TileWidth / 16
+            spr.objy -= offsetY / tile.TileWidth / 16
         for layer in layers:
             for obj in layer:
-                obj.objx -= offsetX // TileWidth
-                obj.objy -= offsetY // TileWidth
+                obj.objx -= offsetX // tile.TileWidth
+                obj.objy -= offsetY // tile.TileWidth
 
         # Calculate the required pixmap size
         pixmapSize = (maxX - minX, maxY - minY)
@@ -6834,7 +4169,7 @@ class Stamp():
         painter.setRenderHint(painter.Antialiasing)
 
         # Paint all objects
-        objw, objh = int(pixmapSize[0] // TileWidth) + 1, int(pixmapSize[1] // TileWidth) + 1
+        objw, objh = int(pixmapSize[0] // tile.TileWidth) + 1, int(pixmapSize[1] // tile.TileWidth) + 1
         for layer in reversed(layers):
             tmap = []
             for i in range(objh):
@@ -6863,14 +4198,14 @@ class Stamp():
                             r = Tiles[tile].main
                             if r is None: continue
                             painter.drawPixmap(destx + drawOffsetX, desty + drawOffsetY, r)
-                        destx += TileWidth
-                    desty += TileWidth
+                        destx += tile.TileWidth
+                    desty += tile.TileWidth
                 painter.restore()
 
         # Paint all sprites
         for spr in sprites:
-            offx = ((spr.objx + spr.ImageObj.xOffset) * TileWidth / 16) + drawOffsetX
-            offy = ((spr.objy + spr.ImageObj.yOffset) * TileWidth / 16) + drawOffsetY
+            offx = ((spr.objx + spr.ImageObj.xOffset) * tile.TileWidth / 16) + drawOffsetX
+            offy = ((spr.objy + spr.ImageObj.yOffset) * tile.TileWidth / 16) + drawOffsetY
 
             painter.save()
             painter.translate(offx, offy)
@@ -7629,6 +4964,37 @@ class EntranceEditorWidget(QtWidgets.QWidget):
         self.allowEntryCheckbox.setToolTip(trans.string('EntranceDataEditor', 9))
         self.allowEntryCheckbox.clicked.connect(self.HandleAllowEntryClicked)
 
+        # self.unknownFlagCheckbox = QtWidgets.QCheckBox(trans.string('EntranceDataEditor', 10))
+        # self.unknownFlagCheckbox.setToolTip(trans.string('EntranceDataEditor', 11))
+        # self.unknownFlagCheckbox.clicked.connect(self.HandleUnknownFlagClicked)
+
+        # self.connectedPipeCheckbox = QtWidgets.QCheckBox(trans.string('EntranceDataEditor', 12))
+        # self.connectedPipeCheckbox.setToolTip(trans.string('EntranceDataEditor', 13))
+        # self.connectedPipeCheckbox.clicked.connect(self.HandleConnectedPipeClicked)
+
+        # self.connectedPipeReverseCheckbox = QtWidgets.QCheckBox(trans.string('EntranceDataEditor', 14))
+        # self.connectedPipeReverseCheckbox.setToolTip(trans.string('EntranceDataEditor', 15))
+        # self.connectedPipeReverseCheckbox.clicked.connect(self.HandleConnectedPipeReverseClicked)
+
+        # self.pathID = QtWidgets.QSpinBox()
+        # self.pathID.setRange(0, 255)
+        # self.pathID.setToolTip(trans.string('EntranceDataEditor', 17))
+        # self.pathID.valueChanged.connect(self.HandlePathIDChanged)
+
+        # self.forwardPipeCheckbox = QtWidgets.QCheckBox(trans.string('EntranceDataEditor', 18))
+        # self.forwardPipeCheckbox.setToolTip(trans.string('EntranceDataEditor', 19))
+        # self.forwardPipeCheckbox.clicked.connect(self.HandleForwardPipeClicked)
+
+        # self.activeLayer = QtWidgets.QComboBox()
+        # self.activeLayer.addItems(trans.stringList('EntranceDataEditor', 21))
+        # self.activeLayer.setToolTip(trans.string('EntranceDataEditor', 22))
+        # self.activeLayer.activated.connect(self.HandleActiveLayerChanged)
+
+        # self.cpDirection = QtWidgets.QComboBox()
+        # self.cpDirection.addItems(trans.stringList('EntranceDataEditor', 27))
+        # self.cpDirection.setToolTip(trans.string('EntranceDataEditor', 26))
+        # self.cpDirection.activated.connect(self.HandleCpDirectionChanged)
+
         self.unk05 = QtWidgets.QSpinBox()
         self.unk05.setRange(0, 255)
         self.unk05.setToolTip('Unknown 0x05')
@@ -7711,6 +5077,19 @@ class EntranceEditorWidget(QtWidgets.QWidget):
         layout.addWidget(self.unk14, 13, 1)
         layout.addWidget(self.unk15, 14, 1)
         layout.addWidget(self.unk16, 15, 1)
+        # layout.addWidget(self.unknownFlagCheckbox, 6, 2, 1, 2)#, Qt.AlignRight)
+        # layout.addWidget(self.forwardPipeCheckbox, 7, 0, 1, 2)#, Qt.AlignRight)
+        # layout.addWidget(self.connectedPipeCheckbox, 7, 2, 1, 2)#, Qt.AlignRight)
+
+        # self.cpHorzLine = createHorzLine()
+        # layout.addWidget(self.cpHorzLine, 8, 0, 1, 4)
+        # layout.addWidget(self.connectedPipeReverseCheckbox, 9, 0, 1, 2)#, Qt.AlignRight)
+        # layout.addWidget(self.pathID, 9, 3, 1, 1)
+        # layout.addWidget(self.pathIDLabel, 9, 2, 1, 1, Qt.AlignRight)
+
+        # layout.addWidget(self.activeLayer, 4, 1, 1, 1)
+        # layout.addWidget(self.cpDirectionLabel, 10, 0, 1, 2, Qt.AlignRight)
+        # layout.addWidget(self.cpDirection, 10, 2, 1, 2)
 
         self.ent = None
         self.UpdateFlag = False
@@ -7741,6 +5120,27 @@ class EntranceEditorWidget(QtWidgets.QWidget):
         self.unk16.setValue(ent.unk16)
 
         self.allowEntryCheckbox.setChecked(((ent.entsettings & 0x80) == 0))
+        #self.unknownFlagCheckbox.setChecked(((ent.entsettings & 2) != 0))
+
+        # self.connectedPipeCheckbox.setVisible(ent.enttype in self.CanUseFlag8)
+        # self.connectedPipeCheckbox.setChecked(((ent.entsettings & 8) != 0))
+
+        # self.connectedPipeReverseCheckbox.setVisible(ent.enttype in self.CanUseFlag8 and ((ent.entsettings & 8) != 0))
+        # self.connectedPipeReverseCheckbox.setChecked(((ent.entsettings & 1) != 0))
+
+        # self.forwardPipeCheckbox.setVisible(ent.enttype in self.CanUseFlag4)
+        # self.forwardPipeCheckbox.setChecked(((ent.entsettings & 4) != 0))
+
+        # self.pathID.setVisible(ent.enttype in self.CanUseFlag8 and ((ent.entsettings & 8) != 0))
+        # self.pathID.setValue(ent.entpath)
+        # self.pathIDLabel.setVisible(ent.enttype in self.CanUseFlag8 and ((ent.entsettings & 8) != 0))
+
+        # self.cpDirection.setVisible(ent.enttype in self.CanUseFlag8 and ((ent.entsettings & 8) != 0))
+        # self.cpDirection.setCurrentIndex(ent.cpdirection)
+        # self.cpDirectionLabel.setVisible(ent.enttype in self.CanUseFlag8 and ((ent.entsettings & 8) != 0))
+        # self.cpHorzLine.setVisible(ent.enttype in self.CanUseFlag8 and ((ent.entsettings & 8) != 0))
+
+        # self.activeLayer.setCurrentIndex(ent.entlayer)
 
         self.UpdateFlag = False
 
@@ -7748,16 +5148,13 @@ class EntranceEditorWidget(QtWidgets.QWidget):
     @QtCore.pyqtSlot(int)
     def HandleEntranceIDChanged(self, i):
         """
-        Handler for the entrance type changing
+        Handler for the entrance ID changing
         """
-        # UPDATED FOR NSMBU
         if self.UpdateFlag: return
         SetDirty()
-        self.ent.enttype = i
-        self.ent.TypeChange()
+        self.ent.entid = i
         self.ent.update()
         self.ent.UpdateTooltip()
-        mainWindow.scene.update()
         self.ent.UpdateListItem()
         self.editingLabel.setText(trans.string('EntranceDataEditor', 23, '[id]', i))
 
@@ -7767,6 +5164,14 @@ class EntranceEditorWidget(QtWidgets.QWidget):
         """
         Handler for the entrance type changing
         """
+        self.connectedPipeCheckbox.setVisible(i in self.CanUseFlag8)
+        self.connectedPipeReverseCheckbox.setVisible(i in self.CanUseFlag8 and ((self.ent.entsettings & 8) != 0))
+        self.pathIDLabel.setVisible(i and ((self.ent.entsettings & 8) != 0))
+        self.pathID.setVisible(i and ((self.ent.entsettings & 8) != 0))
+        self.cpDirection.setVisible(self.ent.enttype in self.CanUseFlag8 and ((self.ent.entsettings & 8) != 0))
+        self.cpDirectionLabel.setVisible(self.ent.enttype in self.CanUseFlag8 and ((self.ent.entsettings & 8) != 0))
+        self.cpHorzLine.setVisible(self.ent.enttype in self.CanUseFlag8 and ((self.ent.entsettings & 8) != 0))
+        self.forwardPipeCheckbox.setVisible(i in self.CanUseFlag4)
         if self.UpdateFlag: return
         SetDirty()
         self.ent.enttype = i
@@ -8588,7 +5993,7 @@ class LocationEditorWidget(QtWidgets.QWidget):
         SetDirty()
         self.loc.objx = i
         self.loc.autoPosChange = True
-        self.loc.setX(int(i * TileWidth / 16))
+        self.loc.setX(int(i * tile.TileWidth / 16))
         self.loc.autoPosChange = False
         self.loc.UpdateRects()
         self.loc.update()
@@ -8602,7 +6007,7 @@ class LocationEditorWidget(QtWidgets.QWidget):
         SetDirty()
         self.loc.objy = i
         self.loc.autoPosChange = True
-        self.loc.setY(int(i * TileWidth / 16))
+        self.loc.setY(int(i * tile.TileWidth / 16))
         self.loc.autoPosChange = False
         self.loc.UpdateRects()
         self.loc.update()
@@ -8670,7 +6075,7 @@ class LocationEditorWidget(QtWidgets.QWidget):
         loc.width = right - left
         loc.height = bottom - top
 
-        loc.setPos(int(left * TileWidth / 16), int(top * TileWidth / 16))
+        loc.setPos(int(left * tile.TileWidth / 16), int(top * tile.TileWidth / 16))
         loc.UpdateRects()
         loc.update()
         self.setLocation(loc) # updates the fields
@@ -9467,13 +6872,6 @@ def FindGameDef(name, skip=None):
         if (not def_.custom) and (folder is not None): continue
         if def_.name == name: return def_
 
-
-
-
-
-
-# Translations
-
 def LoadTranslation():
     """
     Loads the translation
@@ -9485,1113 +6883,7 @@ def LoadTranslation():
     if name in eng: trans = ReggieTranslation(None)
     else: trans = ReggieTranslation(name)
 
-    if generateStringsXML: trans.generateXML()
-
-
-class ReggieTranslation():
-    """
-    A translation of all visible Reggie strings
-    """
-    def __init__(self, name):
-        """
-        Creates a Reggie translation
-        """
-        self.InitAsEnglish()
-
-        # Try to load it from an XML
-        try:
-            self.InitFromXML(name)
-        except Exception:
-            self.InitAsEnglish()
-
-
-    def InitAsEnglish(self):
-        """
-        Initializes the ReggieTranslation as the English translation
-        """
-        self.name = 'English'
-        self.version = 1.0
-        self.translator = 'Treeki, Tempus'
-
-        self.files = {
-            'bga': 'reggiedata/bga.txt',
-            'bgb': 'reggiedata/bgb.txt',
-            'entrancetypes': 'reggiedata/entrancetypes.txt',
-            'levelnames': 'reggiedata/levelnames.xml',
-            'music': 'reggiedata/music.txt',
-            'spritecategories': 'reggiedata/spritecategories.xml',
-            'spritedata': 'reggiedata/spritedata.xml',
-            'tilesets': 'reggiedata/tilesets.xml',
-            'ts1_descriptions': 'reggiedata/ts1_descriptions.txt',
-            }
-
-        self.strings = {
-            'AboutDlg': {
-                0: 'About Reggie!',
-                },
-            'AreaChoiceDlg': {
-                0: 'Choose an Area',
-                1: 'Area [num]',
-                2: 'You have reached the maximum amount of areas in this level.[br]Due to the game\'s limitations, Reggie! only allows you to add up to 4 areas to a level.',
-                },
-            'AreaCombobox': {
-                0: 'Area [num]',
-                },
-            'AreaDlg': {
-                0: 'Area Options',
-                1: 'Tilesets',
-                2: 'Settings',
-                3: 'Timer:',
-                4: '[b]Timer:[/b][br]Sets the time limit, in "Mario seconds," for the level.[br][b]Midway Timer Info:[/b] The midway timer is calculated by subtracting 200 from this value. Because the game will use the timer setting from whatever area the midpoint is located in, it\'s possible to pick your own time limit if you put the midpoint in any area other than Area 1. Just set the time limit value for that area to the midpoint time you want + 200.',
-                5: 'Entrance ID:',
-                6: '[b]Entrance ID:[/b][br]Sets the entrance ID to load into when loading from the World Map',
-                7: 'Wrap across Edges',
-                8: '[b]Wrap across Edges:[/b][br]Makes the stage edges wrap[br]Warning: This option may cause the game to crash or behave weirdly. Wrapping only works correctly where the area is set up in the right way; see Coin Battle 1 for an example.',
-                9: None, # REMOVED: 'Event [id]'
-                10: None, # REMOVED: 'Default Events'
-                11: 'Standard Suite',
-                12: 'Stage Suite',
-                13: 'Background Suite',
-                14: 'Interactive Suite',
-                15: 'None',
-                16: '[CUSTOM]',
-                17: '[CUSTOM] [name]',
-                18: 'Custom filename... [name]',
-                19: '[name] ([file])',
-                20: 'Enter a Filename',
-                21: 'Enter the name of a custom tileset file to use. It must be placed in the game\'s Stage\\Texture or Unit folder in order for Reggie to recognize it. Do not add the \'.arc\' or \'.sarc\' extension at the end of the filename.',
-                22: 'Unknown Value 1:',
-                23: 'Unknown Value 2:',
-                24: 'Unknown Value 3:', # Currently unused
-                25: '[b]Unknown Value 1:[/b] We haven\'t managed to figure out what this does, or if it does anything.',
-                26: '[b]Unknown Value 2:[/b] We haven\'t managed to figure out what this does, or if it does anything.',
-                27: '[b]Unknown Value 3:[/b] We haven\'t managed to figure out what this does, or if it does anything.', # Currently unused
-                28: 'Name',
-                29: 'File',
-                30: '(None)',
-                31: 'Tileset (Pa[slot]):',
-                },
-            'AutoSaveDlg': {
-                0: 'Auto-saved backup found',
-                1: 'Reggie! has found some level data which wasn\'t saved - possibly due to a crash within the editor or by your computer. Do you want to restore this level?[br][br]If you pick No, the autosaved level data will be deleted and will no longer be accessible.[br][br]Original file path: [path]',
-                2: 'The level has unsaved changes in it.',
-                3: 'Do you want to save them?',
-                },
-            'BGDlg': {
-                0: 'Backgrounds',
-                1: (
-                    'None',
-                    '0.125x',
-                    '0.25x',
-                    '0.375x',
-                    '0.5x',
-                    '0.625x',
-                    '0.75x',
-                    '0.875x',
-                    '1x',
-                    'None',
-                    '1.25x',
-                    '1.5x',
-                    '2x',
-                    '4x',
-                    ),
-                2: 'Zone [num]',
-                3: 'Scenery',
-                4: 'Backdrop',
-                5: 'Position:',
-                6: 'X:',
-                7: '[b]Position (X):[/b][br]Sets the horizontal offset of your background',
-                8: 'Y:',
-                9: '[b]Position (Y):[/b][br]Sets the vertical offset of your background',
-                10: 'Scroll Rate:',
-                11: '[b]Scroll Rate (X):[/b][br]Changes the rate that the background moves in[br]relation to Mario when he moves horizontally.[br]Values higher than 1x may be glitchy!',
-                12: '[b]Scroll Rate (Y):[/b][br]Changes the rate that the background moves in[br]relation to Mario when he moves vertically.[br]Values higher than 1x may be glitchy!',
-                13: 'Zoom:',
-                14: '[b]Zoom:[/b][br]Sets the zoom level of the background image',
-                15: (
-                    '100%',
-                    '125%',
-                    '150%',
-                    '200%',
-                    ),
-                16: 'Preview',
-                17: '[name] ([hex])',
-                18: '(Custom)',
-                19: 'Background Types:',
-                20: 'Alignment Mode: This combination of backgrounds will result in "[mode]"',
-                21: (
-                    'Normal',
-                    'Unknown 1',
-                    'Unknown 2',
-                    'Unknown 3',
-                    'Unknown 4',
-                    'Align to Screen',
-                    'Unknown 5',
-                    'Unknown 6',
-                    ),
-                },
-            'ChangeGamePath': {
-                0: 'Choose the Course folder from [game]',
-                1: 'Error',
-                2: 'This folder doesn\'t have all of the files from the extracted NSMBWii Stage folder.',
-                3: 'This folder doesn\'t seem to have the required files. In order to use Reggie, you need the Stage folder from the game, including the Texture folder and the level files contained within it.',
-                },
-            'Comments': {
-                0: '[x], [y]: [text]',
-                1: '[b]Comment[/b][br]at [x], [y]',
-                2: ' - ',
-                3: '(empty)',
-                4: '...',
-                },
-            'DeleteArea': {
-                0: 'Are you [b]sure[/b] you want to delete this area?[br][br]The level will automatically save afterwards - there is no way[br]you can undo the deletion or get it back afterwards!',
-                },
-            'Diag': {
-                0: 'Level Diagnostics Tool',
-                1: 'This level references tilesets not used in NSMBWii.',
-                2: 'Some objects in the level are not found in the tileset files.',
-                3: 'There are sprites in this area which are known to cause NSMBWii to crash.',
-                4: 'There are sprites in this area which have settings which are known to cause NSMBWii to crash.',
-                5: 'There are too many sprites in this area.',
-                6: 'There are entrances with duplicate IDs.',
-                7: 'There is no start entrance in this area.',
-                8: 'The start entrance is too close to the left edge of the zone.',
-                9: 'An entrance is outside of a zone.',
-                10: 'There are more than 8 zones in this area.',
-                11: 'There are no zones in this area.',
-                12: 'Some zones are positioned too close together.',
-                13: 'A zone is positioned too close to the edges of this area.',
-                14: 'Some zones do not have bias enabled.',
-                15: 'Some zones are too large.',
-                16: 'This level references backgrounds not used in NSMBWii.',
-                17: 'Problems found within this area:',
-                18: 'This level is:',
-                19: 'Good',
-                20: 'No problems were found in this area, and it should load[br]correctly in the game. If you\'re experiencing problems,[br]try running the diagnostic again in other areas.',
-                21: 'Probably Good',
-                22: 'There are some things in this area which may[br]cause the level to crash if you\'re not careful.[br]If you\'re experiencing problems, check[br]everything on this list, and try running this test[br]in other areas.',
-                23: 'Broken',
-                24: 'Problems have been found in this area which may cause[br]it to crash in-game. These problems are listed below.',
-                25: 'Fix Selected Items...',
-                26: 'You can select multiple items at once',
-                27: 'Are you sure?',
-                28: 'Are you sure you want fix these items? This [b]cannot[/b] be undone!',
-                29: 'Fixing issues...',
-                },
-            'EntranceDataEditor': {
-                0: 'ID:',
-                1: '[b]ID:[/b][br]Must be different from all other IDs',
-                2: 'Type:',
-                3: '[b]Type:[/b][br]Sets how the entrance behaves',
-                4: 'Dest. ID:',
-                5: '[b]Dest. ID:[/b][br]If this entrance leads nowhere or the destination is in this area, set this to 0.',
-                6: 'Dest. Area:',
-                7: '[b]Dest. Area:[/b][br]If this entrance leads nowhere, set this to 0.',
-                8: 'Enterable',
-                9: '[b]Enterable:[/b][br]If this box is checked on a pipe or door entrance, Mario will be able to enter the pipe/door. If it\'s not checked, he won\'t be able to enter it. Behaviour on other types of entrances is unknown/undefined.',
-                10: 'Unknown Flag',
-                11: '[b]Unknown Flag:[/b][br]This box is checked on a few entrances in the game, but we haven\'t managed to figure out what it does (or if it does anything).',
-                12: 'Connected Pipe',
-                13: '[b]Connected Pipe:[/b][br]This box allows you to enable an unused/broken feature in the game. It allows the pipe to function like the pipes in SMB3 where Mario simply goes through the pipe. However, it doesn\'t work correctly.',
-                14: 'Connected Pipe Reverse',
-                15: '[b]Connected Pipe:[/b][br]This box allows you to enable an unused/broken feature in the game. It allows the pipe to function like the pipes in SMB3 where Mario simply goes through the pipe. However, it doesn\'t work correctly.',
-                16: 'Path ID:',
-                17: '[b]Path ID:[/b][br]Use this option to set the path number that the connected pipe will follow.',
-                18: 'Links to Forward Pipe',
-                19: '[b]Links to Forward Pipe:[/b][br]If this option is set on a pipe, the destination entrance/area values will be ignored - Mario will pass through the pipe and then reappear several tiles ahead, coming out of a forward-facing pipe.',
-                20: 'Layer:',
-                21: ('Layer 1', 'Layer 2', 'Layer 0'),
-                22: '[b]Layer:[/b][br]Allows you to change the collision layer which this entrance is active on. This option is very glitchy and not used in the default levels - for almost all normal cases, you will want to use layer 1.',
-                23: '[b]Entrance [id]:[/b]',
-                24: 'Modify Selected Entrance Properties',
-                25: 'CP Exit Direction:',
-                26: '[b]CP Exit Direction:[/b][br]Set the direction the player will exit out of a connected pipe.',
-                27: (
-                    'Up',
-                    'Down',
-                    'Left',
-                    'Right',
-                    ),
-                28: '([id]) [name]',
-                },
-            'Entrances': {
-                0: '[b]Entrance [ent]:[/b][br]Type: [type][br][i][dest][/i]',
-                1: 'Unknown',
-                2: '(cannot be entered)',
-                3: '(arrives at entrance [id] in this area)',
-                4: '(arrives at entrance [id] in area [area])',
-                5: '[id]: [name] (cannot be entered) at [x], [y]',
-                6: '[id]: [name] (enterable) at [x], [y]'
-                },
-            'Err_BrokenSpriteData': {
-                0: 'Warning',
-                1: 'The sprite data file didn\'t load correctly. The following sprites have incorrect and/or broken data in them, and may not be editable correctly in the editor: [sprites]',
-                2: 'Errors',
-                },
-            'Err_CantFindLevel': {
-                0: 'Could not find file:[br][name]',
-                },
-            'Err_CorruptedTileset': {
-                0: 'Error',
-                1: 'An error occurred while trying to load [file].arc. Check your Unit folder to make sure it is complete and not corrupted. The editor may run in a broken state or crash after this.',
-                },
-            'Err_CorruptedTilesetData': {
-                0: 'Error',
-                1: 'Cannot find the required texture within the tileset file [file].arc, so it will not be loaded. Keep in mind that the tileset file cannot be renamed without changing the names of the texture/object files within the archive as well!',
-                },
-            'Err_InvalidLevel': {
-                0: 'This file doesn\'t seem to be a valid level.',
-                },
-            'Err_MissingFiles': {
-                0: 'Error',
-                1: 'Sorry, you seem to be missing the required data files for Reggie! to work. Please redownload your copy of the editor.',
-                2: 'Sorry, you seem to be missing some of the required data files for Reggie! to work. Please redownload your copy of the editor. These are the files you are missing: [files]',
-                },
-            'Err_MissingLevel': {
-                0: 'Error',
-                1: 'Cannot find the required level file [file].arc. Check your Stage folder and make sure it exists.',
-                },
-            'Err_MissingTileset': {
-                0: 'Error',
-                1: 'Cannot find the required tileset file [file].arc. Check your Stage folder and make sure it exists.',
-                },
-            'Err_Save': {
-                0: 'Error',
-                1: 'Error while Reggie was trying to save the level:[br](#[err1]) [err2][br][br](Your work has not been saved! Try saving it under a different filename or in a different folder.)',
-                },
-            'FileDlgs': {
-                0: 'Choose a level archive',
-                1: 'NSMBU Level Archives',
-                2: 'All Files',
-                3: 'Choose a new filename',
-                4: 'Portable Network Graphics',
-                5: 'Compressed Level Archives',
-                6: 'Choose a stamp archive',
-                7: 'Stamps File',
-                },
-            'Gamedefs': {
-                0: 'This game has custom sprite images',
-                1: 'Loading patch...',
-                2: 'New Game Patch',
-                3: 'It appears that this is your first time using the game patch for [game]. Please select its Stage folder so custom tilesets and levels can be loaded.',
-                4: 'Aborted Game Path Selection',
-                5: 'Since you did not select the stage folder for [game], stages and tilesets will not load correctly. You can try again by choosing Change Game Path while the [game] patch is loaded.',
-                6: 'New Game Patch',
-                7: 'You can change the game path for [game] at any time by choosing Change Game Path while the [game] patch is loaded.',
-                8: 'Loading sprite data...',
-                9: 'Loading background names...',
-                10: 'Reloading tilesets...',
-                11: 'Loading sprite image data...',
-                12: 'Applying sprite image data...',
-                13: 'New Super Mario Bros. U',
-                14: '(insert catchphrase here)[br]Published by Nintendo in August 2012.',
-                15: '[i]No description[/i]',
-                16: 'Loading entrance names...',
-                17: 'Error',
-                18: 'An error occurred while attempting to load this game patch. It will now be unloaded. Here\'s the specific error:[br][error]',
-                },
-            'InfoDlg': {
-                0: 'Level Information',
-                1: 'Add/Change Password',
-                2: 'This level\'s information is locked.[br]Please enter the password below in order to modify it.',
-                3: 'Password:',
-                4: 'Title:',
-                5: 'Author:',
-                6: 'Group:',
-                7: 'Website:',
-                8: 'Created with [name]',
-                9: 'Change Password',
-                10: 'New Password:',
-                11: 'Verify Password:',
-                12: 'Level Information',
-                13: 'Password may be composed of any ASCII character,[br]and up to 64 characters long.[br]',
-                14: 'Sorry![br][br]You can only view or edit Level Information in Area 1.',
-                },
-            'LocationDataEditor': {
-                0: 'ID:',
-                1: '[b]ID:[/b][br]Must be different from all other IDs',
-                2: 'X Pos:',
-                3: '[b]X Pos:[/b][br]Specifies the X position of the location',
-                4: 'Y Pos:',
-                5: '[b]Y Pos:[/b][br]Specifies the Y position of the location',
-                6: 'Width:',
-                7: '[b]Width:[/b][br]Specifies the width of the location',
-                8: 'Height:',
-                9: '[b]Height:[/b][br]Specifies the height of the location',
-                10: 'Snap to Grid',
-                11: '[b]Location [id]:[/b]',
-                12: 'Modify Selected Location Properties',
-                },
-            'Locations': {
-                0: '[id]',
-                1: '', # REMOVED: 'Paint New Location'
-                2: '[id]: [width]x[height] at [x], [y]',
-                },
-            'MainWindow': {
-                0: '[unsaved]',
-                1: 'You\'re trying to paste over 300 items at once.[br]This may take a while (depending on your computer speed), are you sure you want to continue?',
-                },
-            'Menubar': {
-                0: '&File',
-                1: '&Edit',
-                2: '&View',
-                3: '&Settings',
-                4: '&Help',
-                5: 'Editor Toolbar',
-                },
-            'MenuItems': {
-                0: 'New Level',
-                1: 'Create a new, blank level',
-                2: 'Open Level by Name...',
-                3: 'Open a level based on its in-game world/number',
-                4: 'Open Level by File...',
-                5: 'Open a level based on its filename',
-                6: 'Recent Files',
-                7: 'Open a level from a list of recently opened levels',
-                8: 'Save Level',
-                9: 'Save the level back to the archive file',
-                10: 'Export Level As...',
-                11: 'Export raw level data. You\'ll need to Yaz0-compress it yourself...',
-                12: 'Level Information...',
-                13: 'Add title and author information to the level\'s metadata',
-                14: 'Level Screenshot...',
-                15: 'Take a full size screenshot of your level for you to share',
-                16: 'Change Game Path...',
-                17: 'Set a different folder to load the game files from',
-                18: 'Reggie! Preferences...',
-                19: 'Change important Reggie! settings',
-                20: 'Exit Reggie!',
-                21: 'Exit the editor',
-                22: 'Select All',
-                23: 'Select all items in this area',
-                24: 'Deselect',
-                25: 'Deselect all currently selected items',
-                26: 'Cut',
-                27: 'Cut out the current selection to the clipboard',
-                28: 'Copy',
-                29: 'Copy the current selection to the clipboard',
-                30: 'Paste',
-                31: 'Paste items from the clipboard',
-                32: 'Shift Items...',
-                33: 'Move all selected items by an offset',
-                34: 'Merge Locations',
-                35: 'Merge selected locations into a single large location',
-                36: 'Level Diagnostics Tool...',
-                37: 'Find and fix problems with the level',
-                38: 'Freeze\\nObjects',
-                39: 'Make objects non-selectable',
-                40: 'Freeze\\nSprites',
-                41: 'Make sprites non-selectable',
-                42: 'Freeze Entrances',
-                43: 'Make entrances non-selectable',
-                44: 'Freeze\\nLocations',
-                45: 'Make locations non-selectable',
-                46: 'Freeze Paths',
-                47: 'Make paths non-selectable',
-                48: 'Layer 0',
-                49: 'Toggle viewing of object layer 0',
-                50: 'Layer 1',
-                51: 'Toggle viewing of object layer 1',
-                52: 'Layer 2',
-                53: 'Toggle viewing of object layer 2',
-                54: 'Show Sprites',
-                55: 'Toggle viewing of sprites',
-                56: 'Show Sprite Images',
-                57: 'Toggle viewing of sprite images',
-                58: 'Show Locations',
-                59: 'Toggle viewing of locations',
-                60: 'Switch\\nGrid',
-                61: 'Cycle through available grid views',
-                62: 'Zoom to Maximum',
-                63: 'Zoom in all the way',
-                64: 'Zoom In',
-                65: 'Zoom into the main level view',
-                66: 'Zoom 100%',
-                67: 'Show the level at the default zoom',
-                68: 'Zoom Out',
-                69: 'Zoom out of the main level view',
-                70: 'Zoom to Minimum',
-                71: 'Zoom out all the way',
-                72: 'Area\\nSettings...',
-                73: 'Control tileset swapping, stage timer, entrance on load, and stage wrap',
-                74: 'Zone\\nSettings...',
-                75: 'Zone creation, deletion, and preference editing',
-                76: 'Backgrounds...',
-                77: 'Apply backgrounds to individual zones in the current area',
-                78: 'Add New Area',
-                79: 'Add a new area (sublevel) to this level',
-                80: 'Import Area from Level...',
-                81: 'Import an area (sublevel) from another level file',
-                82: 'Delete Current Area...',
-                83: 'Delete the area (sublevel) currently open from the level',
-                84: 'Reload Tilesets',
-                85: 'Reload the tileset data files, including any changes made since the level was loaded',
-                86: 'About Reggie!',
-                87: 'Info about the program, and the team behind it',
-                88: 'Help Contents...',
-                89: 'Help documentation for the needy newbie',
-                90: 'Reggie! Tips...',
-                91: 'Tips and controls for beginners and power users',
-                92: 'About PyQt...',
-                93: 'About the Qt library Reggie! is based on',
-                94: 'Level Overview',
-                95: 'Show or hide the Level Overview window',
-                96: 'Palette',
-                97: 'Show or hide the Palette window',
-                98: 'Change Game',
-                99: 'Change the currently loaded Reggie! game patch',
-                100: 'Island Generator',
-                101: 'Show or hide the Island Generator window',
-                102: None, # REMOVED: 'Stamp Pad'
-                103: None, # REMOVED: 'Show or hide the Stamp Pad window'
-                104: 'Swap Objects\' Tileset',
-                105: 'Swaps the tileset of objects using a certain tileset',
-                106: 'Swap Objects\' Type',
-                107: 'Swaps the type of objects of a certain type',
-                108: 'Tileset Animations',
-                109: 'Play tileset animations if they exist (may cause a slowdown)',
-                110: 'Tileset Collisions',
-                111: 'View tileset collisions for existing objects',
-                112: 'Open Level...',
-                113: None, # This keeps the even-odd pattern going, since 112 uses description 3
-                114: 'Freeze Comments',
-                115: 'Make comments non-selectable',
-                116: 'Show Comments',
-                117: 'Toggle viewing of comments',
-                118: 'Real View',
-                119: 'Show special effects present in the level',
-                120: 'Check for Updates...',
-                121: 'Check if any updates for Reggie! Next are available to download',
-                122: 'Highlight 3D Effects',
-                123: 'Toggle viewing of 3D depth effect highlighting (NSMBU only)',
-                124: 'Freeze\\nProgress Paths',
-                125: 'Make progress paths non-selectable',
-                126: 'Show Fullscreen',
-                127: 'Display the main window with all available screen space'
-                },
-            'Objects': {
-                0: '[b]Tileset [tileset], object [obj]:[/b][br][width]x[height] on layer [layer]',
-                1: 'Object [id]',
-                2: 'Object [id][br][i]This object is animated[/i]',
-                3: '[b]Object [id]:[/b][br][desc]',
-                4: '[b]Object [id]:[/b][br][desc][br][i]This object is animated[/i]',
-                },
-            'OpenFromNameDlg': {
-                0: 'Choose Level',
-                },
-            'Palette': {
-                0: 'Paint on Layer:',
-                1: '[b]Layer 0:[/b][br]This layer is mostly used for hidden caves, but can also be used to overlay tiles to create effects. The flashlight effect will occur if Mario walks behind a tile on layer 0 and the zone has it enabled.[br]This layer is not supported in New Super Mario Bros. U.[br][b]Note:[/b] To switch objects on other layers to this layer, select them and then click this button while holding down the [i]Alt[/i] key.',
-                2: '[b]Layer 1:[/b][br]All or most of your normal level objects should be placed on this layer. This is the only layer where tile interactions (solids, slopes, etc) will work.[br][b]Note:[/b] To switch objects on other layers to this layer, select them and then click this button while holding down the [i]Alt[/i] key.',
-                3: '[b]Layer 2:[/b][br]Background/wall tiles (such as those in the hidden caves) should be placed on this layer. Tiles on layer 2 have no effect on collisions.[br][b]Note:[/b] To switch objects on other layers to this layer, select them and then click this button while holding down the [i]Alt[/i] key.',
-                4: 'View:',
-                5: 'Search:',
-                6: 'Set Default Properties',
-                7: 'Default Properties',
-                8: 'Entrances currently in this area:[br](Double-click one to jump to it instantly)',
-                9: 'Path nodes currently in this area:[br](Double-click one to jump to it instantly)[br]To delete a path, remove all its nodes one by one.[br]To add new paths, hit the button below and right click.',
-                10: 'Deselect (then right click for new path)',
-                11: 'Sprites currently in this area:[br](Double-click one to jump to it instantly)',
-                12: 'Locations currently in this area:[br](Double-click one to jump to it instantly)',
-                13: 'Objects',
-                14: 'Sprites',
-                15: 'Entrances',
-                16: 'Locations',
-                17: 'Paths',
-                18: 'Events',
-                19: 'Stamps',
-                20: 'Event states upon level launch:[br](Click on one to add a note)',
-                21: 'Note:',
-                22: 'State',
-                23: 'Notes',
-                24: 'Event [id]',
-                25: 'Add',
-                26: 'Current',
-                27: 'Available stamps:',
-                28: 'Add',
-                29: 'Remove',
-                30: 'Tools',
-                31: 'Open Set...',
-                32: 'Save Set As...',
-                33: 'Comments',
-                34: 'Comments currently in this area:[br](Double-click one to jump to it instantly)',
-                35: 'Name:',
-                36: 'Progress Paths',
-                37: 'Progress Path nodes currently in this area:[br](Double-click one to jump to it instantly)[br]To delete a progress path, remove all its nodes one by one.[br]To add new progress paths, hit the button below and right click.',
-                38: 'Deselect (then right click for new progress path)',
-                },
-            'PathDataEditor': {
-                0: 'Loops:',
-                1: '[b]Loops:[/b][br]Anything following this path will wait for any delay set at the last node and then proceed back in a straight line to the first node, and continue.',
-                2: 'Speed:',
-                3: '[b]Speed:[/b][br]Unknown unit. Mess around and report your findings!',
-                4: 'Accel:',
-                5: '[b]Accel:[/b][br]Unknown unit. Mess around and report your findings!',
-                6: 'Delay:',
-                7: '[b]Delay:[/b][br]Amount of time to stop here (at this node) before continuing to next node. Unit is 1/60 of a second (60 for 1 second)',
-                8: '[b]Path [id][/b]',
-                9: '[b]Node [id][/b]',
-                10: 'Modify Selected Path Node Properties',
-                },
-            'Paths': {
-                0: '[b]Path [path][/b][br]Node [node]',
-                1: 'Path [path], Node [node]',
-                },
-            'PrefsDlg': {
-                0: 'Reggie! Preferences',
-                1: 'General',
-                2: 'Toolbar',
-                3: 'Themes',
-                4: '[b]Reggie! Preferences[/b][br]Customize Reggie! by changing these settings.[br]Use the tabs below to view even more settings.[br]Reggie! must be restarted before certain changes can take effect.',
-                5: '[b]Toolbar Preferences[/b][br]Choose menu items you would like to appear on the toolbar.[br]Reggie! must be restarted before the toolbar can be updated.[br]',
-                6: '[b]Reggie! Themes[/b][br]Pick a theme below to change application colors and icons.[br]You can download more themes at [a href="rvlution.net"]rvlution.net[/a].[br]Reggie! must be restarted before the theme can be changed.',
-                7: 'Show the splash screen:',
-                8: 'If TPLLib cannot use a fast backend (recommended)',
-                9: 'Always',
-                10: 'Never',
-                11: 'Menu format:',
-                12: 'Use the ribbon',
-                13: 'Use the menubar',
-                14: 'Language:',
-                15: 'Recent Files data:',
-                16: 'Clear All',
-                17: 'Clear All Recent Files Data',
-                18: 'Are you sure you want to delete all recent files data? This [b]cannot[/b] be undone!',
-                19: 'Current Area',
-                20: 'Reset',
-                21: 'Available Themes',
-                22: 'Preview',
-                23: 'Use Nonstandard Window Style',
-                24: '[b]Use Nonstandard Window Style[/b][br]If this is checkable, the selected theme specifies a[br]window style other than the default. In most cases, you[br]should leave this checked. Uncheck this if you dislike[br]the style this theme uses.',
-                25: 'Options',
-                26: '[b][name][/b][br]By [creator][br][description]',
-                27: 'Tilesets:',
-                28: 'Use Default Tileset Picker (recommended)',
-                29: 'Use Old Tileset Picker',
-                30: 'You may need to restart Reggie! for changes to take effect.',
-                },
-            'ProgPaths': {
-                0: '[id]',
-                1: '[id]A',
-                2: '[b]Progress Path [path][/b][br]Node [node]',
-                3: '[b]Progress Path [path]A[/b][br]Node [node]',
-                4: 'Progress Path [path], Node [node]',
-                5: 'Progress Path [path]A, Node [node]',
-                },
-            'ProgPathDataEditor': {
-                0: 'Modify Selected Progress Path Node Properties',
-                1: '[b]Progress Path [id][/b]',
-                2: 'ID:',
-                3: '[b]ID:[/b][br]This is the Progress Path ID. The game puts together all progress paths from all areas and sorts them by this ID. The first progress path should have an ID of 0. Duplicate IDs are allowed if one progress path has the Alternate Path checkbox checked.',
-                4: 'Alternate Path:',
-                5: '[b]Alternate Path:[/b][br]If there are two different zones for the player to choose from, and they both end up in the same place but the player has to choose one or the other, put a Progress Path in each one, give them the same ID and check this checkbox on one of them.',
-                6: '[b]Node [id][/b]',
-                },
-            'Ribbon': {
-                0: '&Home',
-                1: '&Actions',
-                2: '&View',
-                3: '&Game',
-                4: None, # REMOVED: 'H&elp'
-                5: 'Clipboard',
-                6: 'Freeze',
-                7: 'Level Information',
-                8: 'Area',
-                9: 'Selection',
-                10: 'Items',
-                11: 'Level Settings',
-                12: 'Areas',
-                13: 'Tilesets',
-                14: 'Layers',
-                15: 'Visibility',
-                16: 'Zoom',
-                17: 'Docks',
-                18: 'Reggie!',
-                19: 'Libraries',
-                20: '([shortcut]) [description]',
-                21: ', ',
-                22: '(None) [description]',
-                23: '&File',
-                },
-            'ScrShtDlg': {
-                0: 'Choose a Screenshot source',
-                1: 'Current Screen',
-                2: 'All Zones',
-                3: 'Zone [zone]',
-                },
-            'ShftItmDlg': {
-                0: 'Shift Items',
-                1: 'Move objects by:',
-                2: 'Enter an offset in pixels - each block is 16 pixels wide/high. Note that normal objects can only be placed on 16x16 boundaries, so if the offset you enter isn\'t a multiple of 16, they won\'t be moved correctly.',
-                3: 'X:',
-                4: 'Y:',
-                5: 'Warning',
-                6: 'You are trying to move object(s) by an offset which isn\'t a multiple of 16. It will work, but the objects will not be able to move exactly the same amount as the sprites. Are you sure you want to do this?',
-                },
-            'Splash': {
-                0: '[current] (Stage [stage])',
-                1: 'Loading layers...',
-                2: 'Loading level data...',
-                3: 'Loading tilesets...',
-                4: 'Loading objects...',
-                5: 'Preparing editor...',
-                },
-            'SpriteDataEditor': {
-                0: 'Modify Selected Sprite Properties',
-                1: '[b][name][/b]: [note]',
-                2: '[b]Sprite Notes:[/b] [notes]',
-                3: 'Modify Raw Data:',
-                4: 'Notes',
-                5: '[b]Unidentified/Unknown Sprite ([id])[/b]',
-                6: '[b]Sprite [id]:[br][name][/b]',
-                7: 'Object Files',
-                8: '[b]This sprite uses:[/b][br][list]',
-                },
-            'Sprites': {
-                0: '[b]Sprite [type]:[/b][br][name]',
-                1: '[name] (at [x], [y]',
-                2: ', triggered by event [event]',
-                3: ', triggered by events [event1]+[event2]+[event3]+[event4]',
-                4: ', triggered by event [event1], [event2], [event3], or [event4]',
-                5: ', activates event [event]',
-                6: ', activates events [event1] - [event2]',
-                7: ', activates event [event1], [event2], [event3], or [event4]',
-                8: ', Star Coin [num]',
-                9: ', Star Coin 1',
-                10: ', Coin/Set ID [id]',
-                11: ', Movement/Coin ID [id]',
-                12: ', Movement ID [id]',
-                13: ', Rotation ID [id]',
-                14: ', Location ID [id]',
-                15: ')',
-                16: 'Search Results',
-                17: 'No sprites found',
-                18: '[id]: [name]',
-                19: 'Search',
-                },
-            'Statusbar': {
-                0: '- 1 object selected',
-                1: '- 1 sprite selected',
-                2: '- 1 entrance selected',
-                3: '- 1 location selected',
-                4: '- 1 path node selected',
-                5: '- [x] objects selected',
-                6: '- [x] sprites selected',
-                7: '- [x] entrances selected',
-                8: '- [x] locations selected',
-                9: '- [x] path nodes selected',
-                10: '- [x] items selected (',
-                11: ', ',
-                12: '1 object',
-                13: '[x] objects',
-                14: '1 sprite',
-                15: '[x] sprites',
-                16: '1 entrance',
-                17: '[x] entrances',
-                18: '1 location',
-                19: '[x] locations',
-                20: '1 path node',
-                21: '[x] path nodes',
-                22: ')',
-                23: '- Object under mouse: size [width]x[height] at ([xpos], [ypos]) on layer [layer]; type [type] from tileset [tileset]',
-                24: '- Sprite under mouse: [name] at [xpos], [ypos]',
-                25: '- Entrance under mouse: [name] at [xpos], [ypos] [dest]',
-                26: '- Location under mouse: Location ID [id] at [xpos], [ypos]; width [width], height [height]',
-                27: '- Path node under mouse: Path [path], Node [node] at [xpos], [ypos]',
-                28: '([objx], [objy]) - ([sprx], [spry])',
-                29: '- 1 comment selected',
-                30: '- [x] comments selected',
-                31: '1 comment',
-                32: '[x] comments',
-                33: '- Comment under mouse: [xpos], [ypos]; "[text]"',
-                34: '- 1 progress path node selected',
-                35: '- [x] progress path nodes selected',
-                36: '1 progress path node',
-                37: '[x] progress path nodes',
-                38: '- Progress Path node under mouse: Progress Path [path], Node [node] at [xpos], [ypos]',
-                39: '- Progress Path node under mouse: Progress Path [path]A, Node [node] at [xpos], [ypos]',
-                },
-            'Themes': {
-                0: 'Classic',
-                1: 'Treeki, Tempus',
-                2: 'The default Reggie! theme.',
-                3: '[i](unknown)[/i]',
-                4: '[i]No description[/i]',
-                },
-            'Updates': {
-                0: 'Check for Updates',
-                1: 'Error while checking for updates.',
-                2: 'No updates are available.',
-                3: 'An update is available: [name][br][info]',
-                4: 'Download Now',
-                5: 'Please wait, the update is downloading...',
-                6: 'Restart to finalize update!',
-                },
-            'WindowTitle': {
-                0: 'Untitled',
-                },
-            'ZonesDlg': {
-                0: 'Zones',
-                1: (
-                    'Overworld',
-                    'Underground',
-                    'Underwater',
-                    'Lava/Volcano (reddish)',
-                    'Desert',
-                    'Beach*',
-                    'Forest*',
-                    'Snow Overworld*',
-                    'Sky/Bonus*',
-                    'Mountains*',
-                    'Tower',
-                    'Castle',
-                    'Ghost House',
-                    'River Cave',
-                    'Ghost House Exit',
-                    'Underwater Cave',
-                    'Desert Cave',
-                    'Icy Cave*',
-                    'Lava/Volcano',
-                    'Final Battle',
-                    'World 8 Castle',
-                    'World 8 Doomship*',
-                    'Lit Tower',
-                    ),
-                2: (
-                    'Normal/Overworld',
-                    'Underground',
-                    'Underwater',
-                    'Lava/Volcano',
-                    ),
-                3: 'Zone [num]',
-                4: 'New',
-                5: 'Delete',
-                6: 'Warning',
-                7: 'You are trying to add more than 8 zones to a level - keep in mind that without the proper fix to the game, this will cause your level to [b]crash[/b] or have other strange issues![br][br]Are you sure you want to do this?',
-                8: 'Dimensions',
-                9: 'X position:',
-                10: '[b]X position:[/b][br]Sets the X Position of the upper left corner',
-                11: 'Y position:',
-                12: '[b]Y position:[/b][br]Sets the Y Position of the upper left corner',
-                13: 'X size:',
-                14: '[b]X size:[/b][br]Sets the width of the zone',
-                15: 'Y size:',
-                16: '[b]Y size:[/b][br]Sets the height of the zone',
-                17: 'Preset:',
-                18: '[b]Preset:[/b][br]Snaps the zone to common sizes.[br]The number before each entry specifies which zoom level works best with each size.',
-                19: 'Rendering and Camera',
-                20: 'Zone Theme:',
-                21: '[b]Zone Theme:[/b][br]Changes the way models and parts of the background are rendered (for blurring, darkness, lava effects, and so on). Themes with * next to them are used in the game, but look the same as the overworld theme.',
-                22: 'Terrain Lighting:',
-                23: '[b]Terrain Lighting:[/b][br]Changes the way the terrain is rendered. It also affects the parts of the background which the normal theme doesn\'t change.',
-                24: 'Normal',
-                25: '[b]Visibility - Normal:[/b][br]Sets the visibility mode to normal.',
-                26: 'Layer 0 Spotlight',
-                27: '[b]Visibility - Layer 0 Spotlight:[/b][br]Sets the visibility mode to spotlight. In Spotlight mode,[br]moving behind layer 0 objects enables a spotlight that[br]follows Mario around.',
-                28: 'Full Darkness',
-                29: '[b]Visibility - Full Darkness:[/b][br]Sets the visibility mode to full darkness. In full dark mode,[br]the screen is completely black and visibility is only provided[br]by the available spotlight effect. Stars and some sprites[br]can enhance the default visibility.',
-                30: 'X Tracking:',
-                31: '[b]X Tracking:[/b][br]Allows the camera to track Mario across the X dimension.[br]Turning off this option centers the screen horizontally in the view, producing a stationary camera mode.',
-                32: 'Y Tracking:',
-                33: '[b]Y Tracking:[/b][br]Allows the camera to track Mario across the Y dimension.[br]Turning off this option centers the screen vertically in the view, producing very vertically limited stages.',
-                34: 'Zoom Level:',
-                35: '[b]Zoom Level:[/b][br]Changes the camera zoom functionality[br] - Negative values: Zoom In[br] - Positive values: Zoom Out[br][br]Zoom Level 4 is rather glitchy',
-                36: 'Bias:',
-                37: '[b]Bias:[/b][br]Sets the screen bias to the left edge on load, preventing initial scrollback.[br]Useful for pathed levels.[br]Note: Not all zoom/mode combinations support bias',
-                38: (
-                    'Left to Right',
-                    'Right to Left',
-                    'Top to Bottom',
-                    'Bottom to Top',
-                    ),
-                39: 'Camera Tracking:',
-                40: '[b]Camera Tracking:[/b][br]This setting makes changes to camera tracking during multiplayer mode.[br]If the camera doesn\'t move, choose Left to Right.[br]If you\'re unsure, choose Left to Right.',
-                41: (
-                    'Hidden',
-                    'On Top',
-                    ),
-                42: '[b]Visibility:[/b][br]Hidden - Mario is hidden when moving behind objects on Layer 0[br]On Top - Mario is displayed above Layer 0 at all times.[br][br]Note: Entities behind layer 0 other than Mario are never visible',
-                43: (
-                    'Small',
-                    'Large',
-                    'Full Screen',
-                    ),
-                44: '[b]Visibility:[/b][br]Small - A small, centered spotlight affords visibility through layer 0.[br]Large - A large, centered spotlight affords visibility through layer 0[br]Full Screen - the entire screen is revealed whenever Mario walks behind layer 0',
-                45: ('Large Foglight',
-                     'Lightbeam',
-                     'Large Focus Light',
-                     'Small Foglight',
-                     'Small Focus Light',
-                     'Absolute Black',
-                     ),
-                46: '[b]Visibility:[/b][br]Large Foglight - A large, organic lightsource surrounds Mario[br]Lightbeam - Mario is able to aim a conical lightbeam through use of the Wiimote[br]Large Focus Light - A large spotlight which changes size based upon player movement[br]Small Foglight - A small, organic lightsource surrounds Mario[br]Small Focuslight - A small spotlight which changes size based on player movement[br]Absolute Black - Visibility is provided only by fireballs, stars, and certain sprites',
-                47: 'Bounds',
-                48: 'Upper Bounds:',
-                49: '[b]Upper Bounds:[/b][br] - Positive Values: Easier to scroll upwards (110 is centered)[br] - Negative Values: Harder to scroll upwards (30 is the top edge of the screen)[br][br]Values higher than 240 can cause instant death upon screen scrolling',
-                50: 'Lower Bounds:',
-                51: '[b]Lower Bounds:[/b][br] - Positive Values: Harder to scroll downwards (65 is the bottom edge of the screen)[br] - Negative Values: Easier to scroll downwards (95 is centered)[br][br]Values higher than 100 will prevent the scene from scrolling until Mario is offscreen',
-                52: 'Audio',
-                53: 'Background Music:',
-                54: '[b]Background Music:[/b][br]Changes the background music',
-                55: 'Sound Modulation:',
-                56: '[b]Sound Modulation:[/b][br]Changes the sound effect modulation',
-                57: (
-                    'Normal',
-                    'Wall Echo',
-                    'Room Echo',
-                    'Double Echo',
-                    'Cave Echo',
-                    'Underwater Echo',
-                    'Triple Echo',
-                    'High Pitch Echo',
-                    'Tinny Echo',
-                    'Flat',
-                    'Dull',
-                    'Hollow Echo',
-                    'Rich',
-                    'Triple Underwater',
-                    'Ring Echo',
-                    ),
-                58: 'Boss Flag:',
-                59: '[b]Boss Flag:[/b][br]Set for bosses to allow proper music switching by sprites',
-                60: '(None)',
-                61: 'Error',
-                62: 'Zoom level -2 does not support bias modes.',
-                63: 'Zoom level -1 does not support bias modes.',
-                64: 'Zoom level -1 is not supported with these Tracking modes. Set to Zoom level 0.',
-                65: 'Zoom mode 4 can be glitchy with these settings.',
-                66: 'No tracking mode is consistently glitchy and does not support bias.',
-                67: 'No tracking mode is consistently glitchy.',
-                68: 'Background Music ID:',
-                69: '[b]Background Music ID:[/b][br]This advanced option allows custom music tracks to be loaded if the proper ASM hacks are in place.',
-                70: 'Upper Bounds 2:',
-                71: '[b]Upper Bounds 2:[/b][br]Unknown differences from the main upper bounds.',
-                72: 'Lower Bounds 2:',
-                73: '[b]Lower Bounds 2:[/b][br]Unknown differences from the main lower bounds.',
-                74: 'Unknown Flag',
-                75: '[b]Unknown Flag:[/b][br]Unknown purpose. Seems to be always checked.',
-                },
-            'Zones': {
-                0: 'Zone [num]',
-                },
-            }
-
-
-    def InitFromXML(self, name):
-        """
-        Parses the translation XML
-        """
-        if name in ('', None, 'None'): return
-        name = str(name)
-        MaxVer = 1.0
-
-        # Parse the file (errors are handled by __init__())
-        path = 'reggiedata/translations/' + name + '/main.xml'
-        tree = etree.parse(path)
-        root = tree.getroot()
-
-        # Add attributes
-        # Name
-        if 'name' not in root.attrib: raise Exception
-        self.name = root.attrib['name']
-        # Version
-        if 'version' not in root.attrib: raise Exception
-        self.version = float(root.attrib['version'])
-        if self.version > MaxVer: raise Exception
-        # Translator
-        if 'translator' not in root.attrib: raise Exception
-        self.translator = root.attrib['translator']
-
-        # Parse the nodes
-        files = {}
-        strings = False
-        addpath = 'reggiedata/translations/' + name + '/'
-        for node in root:
-            if node.tag.lower() == 'file':
-                # It's a file node
-                name = node.attrib['name']
-                path = addpath + node.attrib['path']
-                files[name] = path
-            elif node.tag.lower() == 'strings':
-                # It's a strings node
-                strings = addpath + node.attrib['path']
-
-        # Get rid of the XML stuff
-        del tree, root
-
-        # Overwrite self.files with files
-        for index in files: self.files[index] = files[index]
-
-
-
-        # Check for a strings node
-        if not strings: raise Exception
-
-        # Parse the strings
-        tree = etree.parse(strings)
-        root = tree.getroot()
-
-        # Parse the nodes
-        strings = {}
-        for section in root:
-            # Get a section
-            if section.tag.lower() != 'section': continue
-            id = section.attrib['id']
-            sectionStrings = {}
-
-            # Get the strings/stringlists in this section
-            for string in section:
-                if not hasattr(string, 'attrib'): continue
-                strValue = None
-                if string.tag.lower() == 'string':
-                    # String node; this is easy
-                    strValue = string[0]
-                elif string.tag.lower() == 'stringlist':
-                    # Not as easy, but not hard
-                    strValue = []
-                    for entry in string:
-                        if entry.tag.lower() == 'entry':
-                            strValue.append(entry[0])
-                    strValue = tuple(strValue)
-
-                # Add this string to sectionStrings
-                idB = int(string.attrib['id'])
-                if strValue is not None: sectionStrings[idB] = strValue
-
-            # Add it to strings
-            strings[id] = sectionStrings
-
-        # Overwrite self.strings with strings
-        for index in strings:
-            if index not in self.strings: self.strings[index] = {}
-            for index2 in strings[index]:
-                self.strings[index][index2] = strings[index][index2]
-
-
-    def string(*args):
-        """
-        Usage: string(section, numcode, replacementDummy, replacement, replacementDummy2, replacement2, etc.)
-        """
-        self = args[0]
-
-        # If there are errors when the string is found, return an error report instead
-        try: return self.string_(args[1:])
-        except Exception as e:
-            text = '\nReggieTranslation.string() ERROR: ' + str(args[1]) + '; ' + str(args[2]) + '; ' + repr(e) + '\n'
-            # do 3 things with the text - print it, save it to ReggieErrors.txt, return it
-            print(text)
-            if not os.path.isfile('ReggieErrors.txt'):
-                f = open('ReggieErrors.txt', 'w')
-            else:
-                f = open('ReggieErrors.txt', 'a')
-            f.write(text)
-            f.close(); del f
-            return text
-
-    def string_(*args):
-        """
-        Gets a string from the translation and returns it
-        """
-        # Get self and remove it from args
-        self = args[0]
-        args = args[1]
-
-        # Get the string
-        astring = self.strings[args[0]][args[1]]
-
-        # Perform any replacements
-        i = 2
-        while i < len(args):
-
-            # Get the old string
-            old = str(args[i])
-
-            # Get the new string
-            new = str(args[i+1])
-
-            # Replace
-            astring = astring.replace(old, new)
-            i += 2
-
-        # Do some automatic replacements
-        replace = {
-            '[br]': '<br>',
-            '[b]': '<b>',
-            '[/b]': '</b>',
-            '[i]': '<i>',
-            '[/i]': '</i>',
-            '[a': '<a',
-            '"]': '">', # workaround
-            '[/a]': '</a>',
-            '\\n': '\n',
-            '//n': '\n',
-            }
-        for old in replace:
-            astring = astring.replace(old, replace[old])
-
-        # Return it
-        return astring
-
-    def stringList(self, section, numcode):
-        """
-        Returns a list of strings
-        """
-        try: return self.strings[section][numcode]
-        except Exception: return ('ReggieTranslation.stringList() ERROR:', section, numcode)
-
-    def path(self, key):
-        """
-        Returns the path to the file indicated by key
-        """
-        try: return self.files[key]
-        except Exception:
-            # (print, save, return) an error message
-            text = 'ReggieTranslation.path() ERROR: ' + key
-            print(text)
-            F = open('ReggieErrors.txt', 'w')
-            F.write(text)
-            F.close()
-            raise SystemExit
-
-    def generateXML(self):
-        """
-        Generates a strings.xml and places it in the folder of reggie.py
-        """
-
-        # Sort self.strings
-        sortedstrings = sorted(
-            (
-                [
-                    key,
-                    sorted(
-                        self.strings[key].items(),
-                        key=lambda entry: entry[0]),
-                    ]
-                for key in self.strings
-                ),
-            key=lambda entry: entry[0])
-
-        # Create an XML
-        root = etree.Element('strings')
-        for sectionname, section in sortedstrings:
-            sectionElem = etree.Element('section', {'id': sectionname})
-            root.append(sectionElem)
-            for stringid, string in section:
-                if isinstance(string, tuple) or isinstance(string, list):
-                    stringlistElem = etree.Element('stringlist', {'id': str(stringid)})
-                    sectionElem.append(stringlistElem)
-                    for entryname in string:
-                        entryElem = etree.Element('entry')
-                        entryElem.text = entryname
-                        stringlistElem.append(entryElem)
-                else:
-                    stringElem = etree.Element('string', {'id': str(stringid)})
-                    stringElem.text = string
-                    sectionElem.append(stringElem)
-
-        tree = etree.ElementTree(root)
-        tree.write('strings.xml', encoding='utf-8')
-
+    if generateStringsXML: trans.generateXML()  
 
 class LevelScene(QtWidgets.QGraphicsScene):
     """
@@ -10610,7 +6902,7 @@ class LevelScene(QtWidgets.QGraphicsScene):
         painter.fillRect(rect, self.bgbrush)
         if not hasattr(Area, 'layers'): return
 
-        drawrect = QtCore.QRectF(rect.x() / TileWidth, rect.y() / TileWidth, rect.width() / TileWidth + 1, rect.height() / TileWidth + 1)
+        drawrect = QtCore.QRectF(rect.x() / tile.TileWidth, rect.y() / tile.TileWidth, rect.width() / tile.TileWidth + 1, rect.height() / tile.TileWidth + 1)
         isect = drawrect.intersects
 
         layer0 = []; l0add = layer0.append
@@ -10677,7 +6969,7 @@ class LevelScene(QtWidgets.QGraphicsScene):
                         desty += 1
 
                 painter.save()
-                painter.translate(x1 * TileWidth, y1 * TileWidth)
+                painter.translate(x1 * tile.TileWidth, y1 * tile.TileWidth)
                 drawPixmap = painter.drawPixmap
                 desty = 0
                 for row in tmap:
@@ -10687,15 +6979,15 @@ class LevelScene(QtWidgets.QGraphicsScene):
 
                         if tile == -1:
                             # Draw unknown tiles
-                            pix = Overrides[108].getCurrentTile()
+                            pix = None#Overrides[108].getCurrentTile()
                         elif tile is not None:
                             pix = tiles[tile].getCurrentTile()
 
                         if pix is not None:
                             painter.drawPixmap(destx, desty, pix)
 
-                        destx += TileWidth
-                    desty += TileWidth
+                        destx += tile.TileWidth
+                    desty += tile.TileWidth
                 painter.restore()
 
 
@@ -10740,8 +7032,8 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
                 clicked = mainWindow.view.mapToScene(event.x(), event.y())
                 if clicked.x() < 0: clicked.setX(0)
                 if clicked.y() < 0: clicked.setY(0)
-                clickedx = int(clicked.x() / TileWidth)
-                clickedy = int(clicked.y() / TileWidth)
+                clickedx = int(clicked.x() / tile.TileWidth)
+                clickedy = int(clicked.y() / tile.TileWidth)
 
                 ln = CurrentLayer
                 layer = Area.layers[CurrentLayer]
@@ -10774,8 +7066,8 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
                     #[18:15:47]  Angel-SL: results in a sprite -2
 
                     # paint a sprite
-                    clickedx = int((clicked.x() - TileWidth / 2) / TileWidth / 2) * TileWidth / 3
-                    clickedy = int((clicked.y() - TileWidth / 2) / TileWidth / 2) * TileWidth / 3
+                    clickedx = int(clicked.x() // tile.TileWidth) * 16
+                    clickedy = int(clicked.y() // tile.TileWidth) * 16
 
                     data = mainWindow.defaultDataEditor.data
                     spr = SpriteItem(CurrentSprite, clickedx, clickedy, data)
@@ -10804,14 +7096,14 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
                 clicked = mainWindow.view.mapToScene(event.x(), event.y())
                 if clicked.x() < 0: clicked.setX(0)
                 if clicked.y() < 0: clicked.setY(0)
-                clickedx = int((clicked.x() - 12) / TileWidth * 16)
-                clickedy = int((clicked.y() - 12) / TileWidth * 16)
+                clickedx = int((clicked.x() - 12) / tile.TileWidth * 16)
+                clickedy = int((clicked.y() - 12) / tile.TileWidth * 16)
 
                 getids = [False for x in range(256)]
                 for ent in Area.entrances: getids[ent.entid] = True
                 minimumID = getids.index(False)
 
-                ent = EntranceItem(clickedx, clickedy, 0, minimumID, 0, 0, 0, 0, 0, 0, 0x80, 0, 0, 0, 0, 0)
+                ent = EntranceItem(clickedx, clickedy, minimumID, 0, 0, 0, 0, 0, 0, 0x80, 0)
                 mw = mainWindow
                 ent.positionChanged = mw.HandleEntPosChange
                 mw.scene.addItem(ent)
@@ -10841,8 +7133,8 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
                 clicked = mainWindow.view.mapToScene(event.x(), event.y())
                 if clicked.x() < 0: clicked.setX(0)
                 if clicked.y() < 0: clicked.setY(0)
-                clickedx = int((clicked.x() - 12) / TileWidth * 16)
-                clickedy = int((clicked.y() - 12) / TileWidth * 16)
+                clickedx = int((clicked.x() - 12) / tile.TileWidth * 16)
+                clickedy = int((clicked.y() - 12) / tile.TileWidth * 16)
                 mw = mainWindow
                 plist = mw.pathList
                 selectedpn = None if len(plist.selectedItems()) < 1 else plist.selectedItems()[0]
@@ -10938,8 +7230,8 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
                 if clicked.x() < 0: clicked.setX(0)
                 if clicked.y() < 0: clicked.setY(0)
 
-                clickedx = int(clicked.x() / TileWidth * 16)
-                clickedy = int(clicked.y() / TileWidth * 16)
+                clickedx = int(clicked.x() / tile.TileWidth * 16)
+                clickedy = int(clicked.y() / tile.TileWidth * 16)
 
                 allID = set() # faster 'x in y' lookups for sets
                 newID = 1
@@ -10980,8 +7272,8 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
                 if clicked.x() < 0: clicked.setX(0)
                 if clicked.y() < 0: clicked.setY(0)
 
-                clickedx = int(clicked.x() / TileWidth * 16)
-                clickedy = int(clicked.y() / TileWidth * 16)
+                clickedx = int(clicked.x() / tile.TileWidth * 16)
+                clickedy = int(clicked.y() / tile.TileWidth * 16)
 
                 stamp = mainWindow.stampChooser.currentlySelectedStamp()
                 if stamp is not None:
@@ -11007,8 +7299,8 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
                 clicked = mainWindow.view.mapToScene(event.x(), event.y())
                 if clicked.x() < 0: clicked.setX(0)
                 if clicked.y() < 0: clicked.setY(0)
-                clickedx = int((clicked.x() - TileWidth / 2) / TileWidth * 16)
-                clickedy = int((clicked.y() - TileWidth / 2) / TileWidth * 16)
+                clickedx = int((clicked.x() - tile.TileWidth / 2) / tile.TileWidth * 16)
+                clickedy = int((clicked.y() - tile.TileWidth / 2) / tile.TileWidth * 16)
 
                 com = CommentItem(clickedx, clickedy, '')
                 mw = mainWindow
@@ -11039,8 +7331,8 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
                 clicked = mainWindow.view.mapToScene(event.x(), event.y())
                 if clicked.x() < 0: clicked.setX(0)
                 if clicked.y() < 0: clicked.setY(0)
-                clickedx = int((clicked.x() - TileWidth / 2) / TileWidth * 16)
-                clickedy = int((clicked.y() - TileWidth / 2) / TileWidth * 16)
+                clickedx = int((clicked.x() - tile.TileWidth / 2) / tile.TileWidth * 16)
+                clickedy = int((clicked.y() - tile.TileWidth / 2) / tile.TileWidth * 16)
                 mw = mainWindow
                 plist = mw.progPathList
                 selectedpn = None if len(plist.selectedItems()) < 1 else plist.selectedItems()[0]
@@ -11198,8 +7490,8 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
                     clicked = mainWindow.view.mapToScene(event.x(), event.y())
                     if clicked.x() < 0: clicked.setX(0)
                     if clicked.y() < 0: clicked.setY(0)
-                    clickx = int(clicked.x() / TileWidth)
-                    clicky = int(clicked.y() / TileWidth)
+                    clickx = int(clicked.x() / tile.TileWidth)
+                    clicky = int(clicked.y() / tile.TileWidth)
 
                     # allow negative width/height and treat it properly :D
                     if clickx >= dsx:
@@ -11220,7 +7512,7 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
                     if cx != x or cy != y:
                         obj.objx = x
                         obj.objy = y
-                        obj.setPos(x * TileWidth, y * TileWidth)
+                        obj.setPos(x * tile.TileWidth, y * tile.TileWidth)
 
                     # if the size changed, recache it and update the area
                     if cwidth != width or cheight != height:
@@ -11229,8 +7521,8 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
                         obj.updateObjCache()
 
                         oldrect = obj.BoundingRect
-                        oldrect.translate(cx * TileWidth, cy * TileWidth)
-                        newrect = QtCore.QRectF(obj.x(), obj.y(), obj.width * TileWidth, obj.height * TileWidth)
+                        oldrect.translate(cx * tile.TileWidth, cy * tile.TileWidth)
+                        newrect = QtCore.QRectF(obj.x(), obj.y(), obj.width * tile.TileWidth, obj.height * tile.TileWidth)
                         updaterect = oldrect.united(newrect)
 
                         obj.UpdateRects()
@@ -11248,8 +7540,8 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
                     clicked = mainWindow.view.mapToScene(event.x(), event.y())
                     if clicked.x() < 0: clicked.setX(0)
                     if clicked.y() < 0: clicked.setY(0)
-                    clickx = int(clicked.x() / TileWidth * 16)
-                    clicky = int(clicked.y() / TileWidth * 16)
+                    clickx = int(clicked.x() / tile.TileWidth * 16)
+                    clicky = int(clicked.y() / tile.TileWidth * 16)
 
                     # allow negative width/height and treat it properly :D
                     if clickx >= dsx:
@@ -11273,7 +7565,7 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
 
                         global OverrideSnapping
                         OverrideSnapping = True
-                        obj.setPos(x * TileWidth / 16, y * TileWidth / 16)
+                        obj.setPos(x * tile.TileWidth / 16, y * tile.TileWidth / 16)
                         OverrideSnapping = False
 
                     # if the size changed, recache it and update the area
@@ -11283,8 +7575,8 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
     #                    obj.updateObjCache()
 
                         oldrect = obj.BoundingRect
-                        oldrect.translate(cx * TileWidth / 16, cy * TileWidth / 16)
-                        newrect = QtCore.QRectF(obj.x(), obj.y(), obj.width * TileWidth / 16, obj.height * TileWidth / 16)
+                        oldrect.translate(cx * tile.TileWidth / 16, cy * tile.TileWidth / 16)
+                        newrect = QtCore.QRectF(obj.x(), obj.y(), obj.width * tile.TileWidth / 16, obj.height * tile.TileWidth / 16)
                         updaterect = oldrect.united(newrect)
 
                         obj.UpdateRects()
@@ -11296,26 +7588,26 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
                     clicked = mainWindow.view.mapToScene(event.x(), event.y())
                     if clicked.x() < 0: clicked.setX(0)
                     if clicked.y() < 0: clicked.setY(0)
-                    clickedx = int((clicked.x() - TileWidth / 2) / TileWidth * 16)
-                    clickedy = int((clicked.y() - TileWidth / 2) / TileWidth * 16)
+                    clickedx = int((clicked.x() - tile.TileWidth / 2) / tile.TileWidth * 16)
+                    clickedy = int((clicked.y() - tile.TileWidth / 2) / tile.TileWidth * 16)
 
                     if obj.objx != clickedx or obj.objy != clickedy:
                         obj.objx = clickedx
                         obj.objy = clickedy
-                        obj.setPos(int((clickedx+obj.ImageObj.xOffset) * TileWidth / 16), int((clickedy+obj.ImageObj.yOffset) * TileWidth / 16))
+                        obj.setPos(int((clickedx+obj.ImageObj.xOffset) * tile.TileWidth / 16), int((clickedy+obj.ImageObj.yOffset) * tile.TileWidth / 16))
 
                 elif isinstance(obj, type_ent) or isinstance(obj, type_path) or isinstance(obj, type_progpath) or isinstance(obj, type_com):
                     # move the created entrance/path/comment
                     clicked = mainWindow.view.mapToScene(event.x(), event.y())
                     if clicked.x() < 0: clicked.setX(0)
                     if clicked.y() < 0: clicked.setY(0)
-                    clickedx = int((clicked.x() - TileWidth / 2) / TileWidth * 16)
-                    clickedy = int((clicked.y() - TileWidth / 2) / TileWidth * 16)
+                    clickedx = int((clicked.x() - tile.TileWidth / 2) / tile.TileWidth * 16)
+                    clickedy = int((clicked.y() - tile.TileWidth / 2) / tile.TileWidth * 16)
 
                     if obj.objx != clickedx or obj.objy != clickedy:
                         obj.objx = clickedx
                         obj.objy = clickedy
-                        obj.setPos(int(clickedx * TileWidth / 16), int(clickedy * TileWidth / 16))
+                        obj.setPos(int(clickedx * tile.TileWidth / 16), int(clickedy * tile.TileWidth / 16))
             event.accept()
 
         elif event.buttons() == Qt.RightButton and self.currentobj is not None and self.dragstamp:
@@ -11337,10 +7629,10 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
                 if clicked.x() < 0: clicked.setX(0)
                 if clicked.y() < 0: clicked.setY(0)
 
-                changex = clicked.x() - (self.dragstartx * TileWidth / 16)
-                changey = clicked.y() - (self.dragstarty * TileWidth / 16)
-                changexobj = int(changex / TileWidth)
-                changeyobj = int(changey / TileWidth)
+                changex = clicked.x() - (self.dragstartx * tile.TileWidth / 16)
+                changey = clicked.y() - (self.dragstarty * tile.TileWidth / 16)
+                changexobj = int(changex / tile.TileWidth)
+                changeyobj = int(changey / tile.TileWidth)
                 changexspr = changex * 2/3
                 changeyspr = changey * 2/3
 
@@ -11353,7 +7645,7 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
 
                         obj.objx = newx
                         obj.objy = newy
-                        obj.setPos(newx * TileWidth, newy * TileWidth)
+                        obj.setPos(newx * tile.TileWidth, newy * tile.TileWidth)
 
                 elif isinstance(obj, type_spr):
                     # move the created sprite
@@ -11364,7 +7656,7 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
                     if obj.objx != newx or obj.objy != newy:
                         obj.objx = newx
                         obj.objy = newy
-                        obj.setPos(int((newx + obj.ImageObj.xOffset) * TileWidth / 16), int((newy + obj.ImageObj.yOffset) * TileWidth / 16))
+                        obj.setPos(int((newx + obj.ImageObj.xOffset) * tile.TileWidth / 16), int((newy + obj.ImageObj.yOffset) * tile.TileWidth / 16))
 
             self.scene().update()
 
@@ -11404,39 +7696,39 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
 
         if GridType == 'grid': # draw a classic grid
             startx = rect.x()
-            startx -= (startx % TileWidth)
-            endx = startx + rect.width() + TileWidth
+            startx -= (startx % tile.TileWidth)
+            endx = startx + rect.width() + tile.TileWidth
 
             starty = rect.y()
-            starty -= (starty % TileWidth)
-            endy = starty + rect.height() + TileWidth
+            starty -= (starty % tile.TileWidth)
+            endy = starty + rect.height() + tile.TileWidth
 
-            x = startx - TileWidth
+            x = startx - tile.TileWidth
             while x <= endx:
-                x += TileWidth
-                if x % (TileWidth * 8) == 0:
-                    painter.setPen(QtGui.QPen(GridColor, 2 * TileWidth / 24, Qt.DashLine))
+                x += tile.TileWidth
+                if x % (tile.TileWidth * 8) == 0:
+                    painter.setPen(QtGui.QPen(GridColor, 2 * tile.TileWidth / 24, Qt.DashLine))
                     drawLine(x, starty, x, endy)
-                elif x % (TileWidth * 4) == 0:
+                elif x % (tile.TileWidth * 4) == 0:
                     if Zoom < 25: continue
-                    painter.setPen(QtGui.QPen(GridColor, 1 * TileWidth / 24, Qt.DashLine))
+                    painter.setPen(QtGui.QPen(GridColor, 1 * tile.TileWidth / 24, Qt.DashLine))
                     drawLine(x, starty, x, endy)
                 else:
                     if Zoom < 50: continue
-                    painter.setPen(QtGui.QPen(GridColor, 1 * TileWidth / 24, Qt.DotLine))
+                    painter.setPen(QtGui.QPen(GridColor, 1 * tile.TileWidth / 24, Qt.DotLine))
                     drawLine(x, starty, x, endy)
 
-            y = starty - TileWidth
+            y = starty - tile.TileWidth
             while y <= endy:
-                y += TileWidth
-                if y % (TileWidth * 8) == 0:
-                    painter.setPen(QtGui.QPen(GridColor, 2 * TileWidth / 24, Qt.DashLine))
+                y += tile.TileWidth
+                if y % (tile.TileWidth * 8) == 0:
+                    painter.setPen(QtGui.QPen(GridColor, 2 * tile.TileWidth / 24, Qt.DashLine))
                     drawLine(startx, y, endx, y)
-                elif y % (TileWidth * 4) == 0 and Zoom >= 25:
-                    painter.setPen(QtGui.QPen(GridColor, 1 * TileWidth / 24, Qt.DashLine))
+                elif y % (tile.TileWidth * 4) == 0 and Zoom >= 25:
+                    painter.setPen(QtGui.QPen(GridColor, 1 * tile.TileWidth / 24, Qt.DashLine))
                     drawLine(startx, y, endx, y)
                 elif Zoom >= 50:
-                    painter.setPen(QtGui.QPen(GridColor, 1 * TileWidth / 24, Qt.DotLine))
+                    painter.setPen(QtGui.QPen(GridColor, 1 * tile.TileWidth / 24, Qt.DotLine))
                     drawLine(startx, y, endx, y)
 
         else: # draw a checkerboard
@@ -11448,7 +7740,7 @@ class LevelViewWidget(QtWidgets.QGraphicsView):
             Light.setAlpha(Light.alpha()*L)
             Dark.setAlpha(Dark.alpha()*D)
 
-            size = TileWidth if Zoom >= 50 else TileWidth * 8
+            size = tile.TileWidth if Zoom >= 50 else tile.TileWidth * 8
 
             board = QtGui.QPixmap(8*size, 8*size)
             board.fill(QtGui.QColor(0,0,0,0))
@@ -13721,7 +10013,7 @@ class DiagnosticToolDialog(QtWidgets.QDialog):
         if mode == 'c': return problem
         elif problem:
             # make an entrance at 1024, 512 with an ID of Area.startEntrance
-            ent = EntranceItem(1024, 512, 0, Area.startEntrance, 0, 0, 0, 0, 0, 0, 0x80, 0, 0, 0, 0, 0)
+            ent = EntranceItem(1024, 512, Area.startEntrance, 0, 0, 0, 0, 0, 0, 0x80, 0)
             ent.positionChanged = mainWindow.HandleEntPosChange
             mainWindow.scene.addItem(ent)
 
@@ -13744,7 +10036,7 @@ class DiagnosticToolDialog(QtWidgets.QDialog):
         Checks if the main entrance is too close to the left zone edge
         """
         global Area
-        offset = TileWidth * 8 # 8 blocks away from the left zone edge
+        offset = tile.TileWidth * 8 # 8 blocks away from the left zone edge
         if len(Area.zones) == 0: return False
 
         # if the ent isn't even in the zone, return
@@ -13763,7 +10055,7 @@ class DiagnosticToolDialog(QtWidgets.QDialog):
 
         problem = start.objx < firstzone.objx + offset
         if mode == 'c': return problem
-        elif problem: start.setPos((firstzone.objx + offset) * TileWidth / 16, start.objy * TileWidth / 16)
+        elif problem: start.setPos((firstzone.objx + offset) * tile.TileWidth / 16, start.objy * tile.TileWidth / 16)
 
 
     def EntranceOutsideOfZone(self, mode='f'):
@@ -13771,7 +10063,7 @@ class DiagnosticToolDialog(QtWidgets.QDialog):
         Checks if any entrances are not inside of a zone
         """
         global Area
-        left_offset = TileWidth * 8 # 8 blocks away from the left zone edge
+        left_offset = tile.TileWidth * 8 # 8 blocks away from the left zone edge
         if len(Area.zones) == 0: return False
 
         for ent in Area.entrances:
@@ -13799,7 +10091,7 @@ class DiagnosticToolDialog(QtWidgets.QDialog):
                 else:                             newy = ent.objy
                 ent.objx = newx
                 ent.objy = newy
-                ent.setPos(int(newx * TileWidth / 16), int(newy * TileWidth / 16))
+                ent.setPos(int(newx * tile.TileWidth / 16), int(newy * tile.TileWidth / 16))
                 mainWindow.scene.update()
 
         return False
@@ -13900,7 +10192,7 @@ class DiagnosticToolDialog(QtWidgets.QDialog):
                             if check.height < 200: check.height = 200
 
                             check.UpdateRects()
-                            check.setPos(int(check.objx * (TileWidth/16)), int(check.objy * (TileWidth/16)))
+                            check.setPos(int(check.objx * (tile.TileWidth/16)), int(check.objy * (tile.TileWidth/16)))
                             mainWindow.scene.update()
                             checkzone = check.ZoneRect
 
@@ -15215,7 +11507,7 @@ class PreferencesDialog(QtWidgets.QDialog):
                     fp = 'reggiedata/translations/' + trans + '/main.xml'
                     if not os.path.isfile(fp): continue
 
-                    transobj = ReggieTranslation(trans)
+                    transobj = dialog.ReggieTranslation(trans)
                     name = transobj.name
                     self.Trans.addItem(name)
                     self.Trans.setItemData(i, trans, Qt.UserRole)
@@ -15755,6 +12047,7 @@ class ReggieWindow(QtWidgets.QMainWindow):
     """
     Reggie main level editor window
     """
+    ZoomLevel = 100
 
     def CreateAction(self, shortname, function, icon, text, statustext, shortcut, toggle=False):
         """
@@ -15807,7 +12100,7 @@ class ReggieWindow(QtWidgets.QMainWindow):
         self.setIconSize(QtCore.QSize(16, 16))
 
         # create the level view
-        self.scene = LevelScene(0, 0, 1024*TileWidth, 512*TileWidth, self)
+        self.scene = LevelScene(0, 0, 1024*tile.TileWidth, 512*tile.TileWidth, self)
         self.scene.setItemIndexMethod(QtWidgets.QGraphicsScene.NoIndex)
         self.scene.selectionChanged.connect(self.ChangeSelectionHandler)
 
@@ -15856,92 +12149,18 @@ class ReggieWindow(QtWidgets.QMainWindow):
         self.SetupDocksAndPanels()
 
         # now get stuff ready
-        loaded = False
         curgame = self.CurrentGame
 
-        if not AutoOpenScriptEnabled:
-            if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]) and IsNSMBLevel(sys.argv[1]):
-                loaded = self.LoadLevel(curgame, sys.argv[1], True, 1)
-            elif settings.contains('LastLevelNSMBUversion') and False:
-                lastlevel = str(gamedef.GetLastLevel())
-                loaded = self.LoadLevel(curgame, lastlevel, True, 1)
-
-            if not loaded:
-                self.LoadLevel(curgame, FirstLevels[curgame], False, 1)
+        # load something
+        filetypes = ''
+        filetypes += trans.string('FileDlgs', 1) + ' (*.szs);;'
+        filetypes += 'Uncompressed Level Archives (*.sarc);;'
+        filetypes += trans.string('FileDlgs', 2) + ' (*)'
+        fn = QtWidgets.QFileDialog.getOpenFileName(self, trans.string('FileDlgs', 0), '', filetypes)[0]
+        if fn:
+            self.LoadLevel(curgame, fn, True, 1)
         else:
-            # Auto-level-opening script for rapid testing and analysis
-            pass
-
-            # To search for sprites, put this in the __init__ function of SpriteItem:
-            # for byte in range(8):
-            #     nyb1 = data[byte] >> 4
-            #     nyb2 = data[byte] & 0xF
-            #     if nyb1 not in SpriteDatas[type][byte * 2]:
-            #         SpriteDatas[type][byte * 2][nyb1] = []
-            #     if CurrentLevelNameForAutoOpenScript not in SpriteDatas[type][byte * 2][nyb1]:
-            #         SpriteDatas[type][byte * 2][nyb1].append(CurrentLevelNameForAutoOpenScript)
-            #     if nyb2 not in SpriteDatas[type][byte * 2 + 1]:
-            #         SpriteDatas[type][byte * 2 + 1][nyb2] = []
-            #     if CurrentLevelNameForAutoOpenScript not in SpriteDatas[type][byte * 2 + 1][nyb2]:
-            #         SpriteDatas[type][byte * 2 + 1][nyb2].append(CurrentLevelNameForAutoOpenScript)
-            # SpriteDatas[type][16].append(CurrentLevelNameForAutoOpenScript)
-            # ... and this before the auto-opening loop:
-            # global SpriteDatas
-            # SpriteDatas = []
-            # for i in range(724):
-            #     newlist = []
-            #     for nyb in range(16):
-            #         newlist.append({})
-            #     newlist.append([]) # list of all levels in which it's used
-            #     SpriteDatas.append(newlist)
-            # ... and this after the auto-opening loop:
-            # prints = ''
-            # for sprnum in range(724):
-            #     data = SpriteDatas[sprnum]
-            #     printedFirstThing = False
-            #     if not data[9]:
-            #         prints += 'Sprite %d is unused.\n' % sprnum
-            #     else:
-            #         prints += 'Sprite %d:\n' % sprnum
-            #         prints += '    Used in ' + ', '.join(sorted(set(data[16]))) + '\n'
-            #         for byte in range(8):
-            #             nyb1 = data[byte * 2]
-            #             nyb2 = data[byte * 2 + 1]
-            #             if len(nyb1) > 1 or (len(nyb1) == 1 and 0 not in nyb1):
-            #                 prints += '    Nybble %d:\n' % (byte * 2 + 1)
-            #                 for nybval, usedin in sorted(nyb1.items(), key=lambda thing: thing[0]):
-            #                     if usedin:
-            #                         prints += '        Value %s used in ' % hex(nybval)[2:]
-            #                         prints += ', '.join(sorted(usedin))
-            #                         prints += '\n'
-            #             if len(nyb2) > 1 or (len(nyb2) == 1 and 0 not in nyb2):
-            #                 prints += '    Nybble %d:\n' % (byte * 2 + 2)
-            #                 for nybval, usedin in sorted(nyb2.items(), key=lambda thing: thing[0]):
-            #                     if usedin:
-            #                         prints += '        Value %s used in ' % hex(nybval)[2:]
-            #                         prints += ', '.join(sorted(usedin))
-            #                         prints += '\n'
-            # print(prints)
-
-            # To search for Pa0 objects, put this in the __init__ method for ObjectItem:
-            # unknownvalues = (0, 1, 2, 3, 4, 6, 7, 10, 12, 19, 24, 25, 28, 31, 36, 38)
-            # if tileset == 0 and type in unknownvalues:
-            #     print('Unknown thing in %s: Type %d (at (%d, %d))' % (CurrentLevelNameForAutoOpenScript, type, x, y))
-
-            # Leave this here
-            global CurrentLevelNameForAutoOpenScript
-            for levelname in os.listdir(setting('GamePath_NSMBU')):
-                if not levelname.endswith(FileExtentions[curgame]): continue
-                print('Loading %s...' % levelname)
-                if 'NSLU' in levelname: continue
-                if '1-' in levelname or '2-' in levelname or '3-' in levelname or '4-' in levelname or '5-' in levelname or '6-' in levelname or '10-' in levelname or '11-' in levelname or '12-' in levelname or '13-' in levelname or '14-' in levelname or '15-' in levelname or '16-' in levelname or '17-' in levelname or '18-' in levelname or '19-' in levelname: continue
-                for areanum in range(4):
-                    try:
-                        CurrentLevelNameForAutoOpenScript = levelname[:-4] + ' A' + str(areanum + 1)
-                        print(CurrentLevelNameForAutoOpenScript)
-                        self.LoadLevel(NewSuperMarioBros2, os.path.join(setting('GamePath'), levelname), True, areanum + 1)
-                    except: raise
-
+            self.LoadLevel(curgame, FirstLevels[curgame], False, 1)
 
         QtCore.QTimer.singleShot(100, self.levelOverview.update)
 
@@ -17151,7 +13370,7 @@ class ReggieWindow(QtWidgets.QMainWindow):
         Select all objects in the current area
         """
         paintRect = QtGui.QPainterPath()
-        paintRect.addRect(float(0), float(0), float(1024*TileWidth), float(512*TileWidth))
+        paintRect.addRect(float(0), float(0), float(1024*tile.TileWidth), float(512*tile.TileWidth))
         self.scene.setSelectionArea(paintRect)
 
 
@@ -17352,10 +13571,10 @@ class ReggieWindow(QtWidgets.QMainWindow):
         zoomscaler = (self.ZoomLevel / 100.0)
         width = x2 - x1 + 1
         height = y2 - y1 + 1
-        viewportx = (self.view.XScrollBar.value() / zoomscaler) / TileWidth
-        viewporty = (self.view.YScrollBar.value() / zoomscaler) / TileWidth
-        viewportwidth = (self.view.width() / zoomscaler) / TileWidth
-        viewportheight = (self.view.height() / zoomscaler) / TileWidth
+        viewportx = (self.view.XScrollBar.value() / zoomscaler) / tile.TileWidth
+        viewporty = (self.view.YScrollBar.value() / zoomscaler) / tile.TileWidth
+        viewportwidth = (self.view.width() / zoomscaler) / tile.TileWidth
+        viewportheight = (self.view.height() / zoomscaler) / tile.TileWidth
 
         # tiles
         if xOverride is None:
@@ -17374,11 +13593,11 @@ class ReggieWindow(QtWidgets.QMainWindow):
         for item in added:
             if isinstance(item, SpriteItem):
                 item.setPos(
-                    (item.objx + xpixeloffset + item.ImageObj.xOffset) * TileWidth / 16,
-                    (item.objy + ypixeloffset + item.ImageObj.yOffset) * TileWidth / 16,
+                    (item.objx + xpixeloffset + item.ImageObj.xOffset) * tile.TileWidth / 16,
+                    (item.objy + ypixeloffset + item.ImageObj.yOffset) * tile.TileWidth / 16,
                     )
             elif isinstance(item, ObjectItem):
-                item.setPos((item.objx + xoffset) * TileWidth, (item.objy + yoffset) * TileWidth)
+                item.setPos((item.objx + xoffset) * tile.TileWidth, (item.objy + yoffset) * tile.TileWidth)
             if select: item.setSelected(True)
 
         OverrideSnapping = False
@@ -17433,7 +13652,7 @@ class ReggieWindow(QtWidgets.QMainWindow):
                     if width < 1 or width > 1023: continue
                     if height < 1 or height > 511: continue
 
-                    newitem = ObjectItem(tileset, type, layer, objx, objy, width, height, 1, 0, 0)
+                    newitem = ObjectItem(tileset, type, layer, objx, objy, width, height, 1)
 
                     layers[layer].append(newitem)
 
@@ -17443,7 +13662,7 @@ class ReggieWindow(QtWidgets.QMainWindow):
 
                     objx = int(split[2])
                     objy = int(split[3])
-                    data = bytes(map(int, [split[4], split[5], split[6], split[7], split[8], split[9], '0', split[10]]))
+                    data = bytes(map(int, [split[4], split[5], split[6], split[7], split[8], split[9], '0', split[10], '0', '0', '0', '0', '0', '0']))
 
                     x = objx / 16
                     y = objy / 16
@@ -17494,8 +13713,8 @@ class ReggieWindow(QtWidgets.QMainWindow):
                     if result == QtWidgets.QMessageBox.No:
                         return
 
-            xpoffset = xoffset * TileWidth / 16
-            ypoffset = yoffset * TileWidth / 16
+            xpoffset = xoffset * tile.TileWidth / 16
+            ypoffset = yoffset * tile.TileWidth / 16
 
             global OverrideSnapping
             OverrideSnapping = True
@@ -17637,9 +13856,9 @@ class ReggieWindow(QtWidgets.QMainWindow):
             return
 
         filetypes = ''
-        filetypes += trans.string('FileDlgs', 1) + ' (*.szs);;' # *.szs
-        filetypes += trans.string('FileDlgs', 5) + ' (*.szs.lh);;' # *.szs.LH
-        filetypes += trans.string('FileDlgs', 2) + ' (*)' # *
+        filetypes += trans.string('FileDlgs', 1) + ' (*.szs);;'
+        filetypes += 'Uncompressed Level Archives (*.sarc);;'
+        filetypes += trans.string('FileDlgs', 2) + ' (*)'
         fn = QtWidgets.QFileDialog.getOpenFileName(self, trans.string('FileDlgs', 0), '', filetypes)[0]
         if fn == '': return
 
@@ -17833,9 +14052,9 @@ class ReggieWindow(QtWidgets.QMainWindow):
         if self.CheckDirty(): return
 
         filetypes = ''
-        filetypes += trans.string('FileDlgs', 1) + ' (*.szs);;' # *.szs
-        filetypes += trans.string('FileDlgs', 5) + ' (*.szs.lh);;' # *.szs.LH
-        filetypes += trans.string('FileDlgs', 2) + ' (*)' # *
+        filetypes += trans.string('FileDlgs', 1) + ' (*.szs);;'
+        filetypes += 'Uncompressed Level Archives (*.sarc);;'
+        filetypes += trans.string('FileDlgs', 2) + ' (*)'
         fn = QtWidgets.QFileDialog.getOpenFileName(self, trans.string('FileDlgs', 0), '', filetypes)[0]
         if fn == '': return
         self.LoadLevel(None, str(fn), True, 1)
@@ -17873,7 +14092,7 @@ class ReggieWindow(QtWidgets.QMainWindow):
         """
         Save a level back to the archive, with a new filename
         """
-        fn = QtWidgets.QFileDialog.getSaveFileName(self, trans.string('FileDlgs', 3), '', trans.string('FileDlgs', 1) + ' (*.szs);;' + trans.string('FileDlgs', 2) + ' (*)')[0]
+        fn = QtWidgets.QFileDialog.getSaveFileName(self, trans.string('FileDlgs', 3), '', 'Uncompressed Level Archives (*.sarc);;' + trans.string('FileDlgs', 2) + ' (*)')[0]
         if fn == '': return
         fn = str(fn)
 
@@ -18058,13 +14277,13 @@ class ReggieWindow(QtWidgets.QMainWindow):
                 spr.UpdateRects()
                 if SpriteImagesShown:
                     spr.setPos(
-                        (spr.objx + spr.ImageObj.xOffset) * (TileWidth/16),
-                        (spr.objy + spr.ImageObj.yOffset) * (TileWidth/16),
+                        (spr.objx + spr.ImageObj.xOffset) * (tile.TileWidth/16),
+                        (spr.objy + spr.ImageObj.yOffset) * (tile.TileWidth/16),
                         )
                 else:
                     spr.setPos(
-                        spr.objx * (TileWidth/16),
-                        spr.objy * (TileWidth/16),
+                        spr.objx * (tile.TileWidth/16),
+                        spr.objy * (tile.TileWidth/16),
                         )
 
         self.scene.update()
@@ -18321,7 +14540,7 @@ class ReggieWindow(QtWidgets.QMainWindow):
         """
         Zoom to a specific level
         """
-        zEffective = z / TileWidth * 24 # "100%" zoom level produces 24x24 level view
+        zEffective = z / tile.TileWidth * 24 # "100%" zoom level produces 24x24 level view
         tr = QtGui.QTransform()
         tr.scale(zEffective / 100.0, zEffective / 100.0)
         self.ZoomLevel = z
@@ -18452,7 +14671,7 @@ class ReggieWindow(QtWidgets.QMainWindow):
 
         name = checkname
 
-        if not name.endswith('.szs'): return False # keep it from crashing by loading things it shouldn't
+        if not (name.endswith('.szs') or name.endswith('.sarc')): return False # keep it from crashing by loading things it shouldn't
 
         # Get the data
         global RestoredFromAutoSave
@@ -18497,19 +14716,34 @@ class ReggieWindow(QtWidgets.QMainWindow):
         Dirty = False
         DirtyOverride += 1
 
-        # ----- BEGIN NSMBU CHANGES -------
-
         # Decompress it (Yaz0)
-        print('Begin')
-        levelData = yaz0.decompress(levelData)
-        print('End')
+        if levelData.startswith(b'Yaz0'):
+            print('Beginning Yaz0 decompression...')
+            levelData = yaz0.decompress(levelData)
+            print('Decompression finished.')
+        else:
+            print('Yaz0 decompression skipped.')
 
         arc = SarcLib.SARC_Archive()
         arc.load(levelData)
 
-        try:
-            levelFileData = arc[os.path.basename(name).split(' ')[-1][:-4]].data
-        except:
+        def exists(fn):
+            nonlocal arc
+            try: arc[fn]
+            except: return False
+            return True
+
+        possibilities = []
+        if exists('levelname'):
+            possibilities.append(arc['levelname'].data.decode('utf-8'))
+        possibilities.append(os.path.basename(name))
+        possibilities.append(possibilities[-1].split()[-1]) # for formats like "NSMBU 1-1.szs"
+        possibilities.append(possibilities[-1].split('.')[0])
+        for fn in possibilities:
+            if exists(fn):
+                levelFileData = arc[fn].data
+                break
+        else:
             return False
 
         # Sort the szs data
@@ -18519,8 +14753,6 @@ class ReggieWindow(QtWidgets.QMainWindow):
             szsData[file.name] = file.data
 
         levelData = levelFileData
-
-        # ---- END NSMBU CHANGES -----
 
         # Track progress.. but only if we don't have TPLLib
         # Cython version because otherwise it's far too fast.
@@ -18612,7 +14844,7 @@ class ReggieWindow(QtWidgets.QMainWindow):
             if ent.entid == startEntID: startEnt = ent
 
         self.view.centerOn(0, 0)
-        if startEnt is not None: self.view.centerOn(startEnt.objx * (TileWidth/16), startEnt.objy * (TileWidth/16))
+        if startEnt is not None: self.view.centerOn(startEnt.objx * (tile.TileWidth/16), startEnt.objy * (tile.TileWidth/16))
         self.ZoomTo(100.0)
 
         # Reset some editor things
@@ -18671,7 +14903,7 @@ class ReggieWindow(QtWidgets.QMainWindow):
 
         # Create the new level object
         global Level
-        Level = Level_NSMBU()
+        Level = level.Level_NSMBU()
 
         # Load it
         if not Level.load(levelData, areaNum, progress):
@@ -19014,8 +15246,8 @@ class ReggieWindow(QtWidgets.QMainWindow):
         for thing in selitems:
             # This helps sync non-objects with objects while dragging
             if not isinstance(thing, ObjectItem):
-                thing.dragoffsetx = (((thing.objx // 16) * 16) - thing.objx) * TileWidth / 16
-                thing.dragoffsety = (((thing.objy // 16) * 16) - thing.objy) * TileWidth / 16
+                thing.dragoffsetx = (((thing.objx // 16) * 16) - thing.objx) * tile.TileWidth / 16
+                thing.dragoffsety = (((thing.objy // 16) * 16) - thing.objy) * tile.TileWidth / 16
 
         self.spriteEditorDock.setVisible(showSpritePanel)
         self.entranceEditorDock.setVisible(showEntrancePanel)
@@ -19611,7 +15843,7 @@ class ReggieWindow(QtWidgets.QMainWindow):
             elif isinstance(hovered, CommentItem): # Comment
                 info = trans.string('Statusbar', 33, '[xpos]', hovered.objx, '[ypos]', hovered.objy, '[text]', hovered.OneLineText())
 
-        self.posLabel.setText(trans.string('Statusbar', 28, '[objx]', int(x/TileWidth), '[objy]', int(y/TileWidth), '[sprx]', int(x/TileWidth*16), '[spry]', int(y/TileWidth*16)))
+        self.posLabel.setText(trans.string('Statusbar', 28, '[objx]', int(x/tile.TileWidth), '[objy]', int(y/tile.TileWidth), '[sprx]', int(x/tile.TileWidth*16), '[spry]', int(y/tile.TileWidth*16)))
         self.hoverLabel.setText(info)
 
 
@@ -19751,7 +15983,7 @@ class ReggieWindow(QtWidgets.QMainWindow):
 
                 z.prepareGeometryChange()
                 z.UpdateRects()
-                z.setPos(z.objx*(TileWidth/16), z.objy*(TileWidth/16))
+                z.setPos(z.objx*(tile.TileWidth/16), z.objy*(tile.TileWidth/16))
 
                 z.modeldark = tab.Zone_modeldark.currentIndex()
                 z.terraindark = tab.Zone_terraindark.currentIndex()
@@ -20048,16 +16280,16 @@ class ReggieWindow(QtWidgets.QMainWindow):
                 maxX = maxY = 0
                 minX = minY = 0x0ddba11
                 for z in Area.zones:
-                    if maxX < ((z.objx*(TileWidth/16)) + (z.width*(TileWidth/16))):
-                        maxX = ((z.objx*(TileWidth/16)) + (z.width*(TileWidth/16)))
-                    if maxY < ((z.objy*(TileWidth/16)) + (z.height*(TileWidth/16))):
-                        maxY = ((z.objy*(TileWidth/16)) + (z.height*(TileWidth/16)))
-                    if minX > z.objx*(TileWidth/16):
-                        minX = z.objx*(TileWidth/16)
-                    if minY > z.objy*(TileWidth/16):
-                        minY = z.objy*(TileWidth/16)
-                maxX = (1024*TileWidth if 1024*TileWidth < maxX+40 else maxX+40)
-                maxY = (512*TileWidth if 512*TileWidth < maxY+40 else maxY+40)
+                    if maxX < ((z.objx*(tile.TileWidth/16)) + (z.width*(tile.TileWidth/16))):
+                        maxX = ((z.objx*(tile.TileWidth/16)) + (z.width*(tile.TileWidth/16)))
+                    if maxY < ((z.objy*(tile.TileWidth/16)) + (z.height*(tile.TileWidth/16))):
+                        maxY = ((z.objy*(tile.TileWidth/16)) + (z.height*(tile.TileWidth/16)))
+                    if minX > z.objx*(tile.TileWidth/16):
+                        minX = z.objx*(tile.TileWidth/16)
+                    if minY > z.objy*(tile.TileWidth/16):
+                        minY = z.objy*(tile.TileWidth/16)
+                maxX = (1024*tile.TileWidth if 1024*tile.TileWidth < maxX+40 else maxX+40)
+                maxY = (512*tile.TileWidth if 512*tile.TileWidth < maxY+40 else maxY+40)
                 minX = (0 if 40 > minX else minX-40)
                 minY = (40 if 40 > minY else minY-40)
 
@@ -20071,11 +16303,11 @@ class ReggieWindow(QtWidgets.QMainWindow):
 
             else:
                 i = dlg.zoneCombo.currentIndex() - 2
-                ScreenshotImage = QtGui.QImage(Area.zones[i].width*TileWidth/16, Area.zones[i].height*TileWidth/16, QtGui.QImage.Format_ARGB32)
+                ScreenshotImage = QtGui.QImage(Area.zones[i].width*tile.TileWidth/16, Area.zones[i].height*tile.TileWidth/16, QtGui.QImage.Format_ARGB32)
                 ScreenshotImage.fill(Qt.transparent)
 
                 RenderPainter = QtGui.QPainter(ScreenshotImage)
-                mainWindow.scene.render(RenderPainter, QtCore.QRectF(0, 0, Area.zones[i].width*TileWidth/16, Area.zones[i].height*TileWidth/16), QtCore.QRectF(int(Area.zones[i].objx)*TileWidth/16, int(Area.zones[i].objy)*TileWidth/16, Area.zones[i].width*TileWidth/16, Area.zones[i].height*TileWidth/16))
+                mainWindow.scene.render(RenderPainter, QtCore.QRectF(0, 0, Area.zones[i].width*tile.TileWidth/16, Area.zones[i].height*tile.TileWidth/16), QtCore.QRectF(int(Area.zones[i].objx)*tile.TileWidth/16, int(Area.zones[i].objy)*tile.TileWidth/16, Area.zones[i].width*tile.TileWidth/16, Area.zones[i].height*tile.TileWidth/16))
                 RenderPainter.end()
 
             ScreenshotImage.save(fn, 'PNG', 50)
@@ -20136,7 +16368,7 @@ def main():
     LoadSpriteListData()
     LoadEntranceNames()
     LoadNumberFont()
-    LoadOverrides()
+    tile.LoadOverrides()
     SLib.OutlineColor = theme.color('smi')
     SLib.main()
 
@@ -20182,20 +16414,6 @@ def main():
         else:
             setSetting('GamePath_NSMBU', path)
             break
-
-    # check to see if we have anything saved
-    autofile = setting('AutoSaveFilePath')
-    if autofile is not None:
-        autofiledata = setting('AutoSaveFileData', 'x')
-        result = AutoSavedInfoDialog(autofile).exec_()
-        if result == QtWidgets.QDialog.Accepted:
-            global RestoredFromAutoSave, AutoSavePath, AutoSaveData
-            RestoredFromAutoSave = True
-            AutoSavePath = autofile
-            AutoSaveData = bytes(autofiledata, 'latin-1')
-        else:
-            setSetting('AutoSaveFilePath', 'none')
-            setSetting('AutoSaveFileData', 'x')
 
     # create and show the main window
     mainWindow = ReggieWindow()

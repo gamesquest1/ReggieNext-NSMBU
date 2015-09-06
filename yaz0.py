@@ -106,7 +106,7 @@ class yaz0():
                     else:
                         print (
                                'Decompressed size already reached. '
-                               #'Disregarding Byte {0}, ascii: [{1}]'.format(hex(byte[0]), byte)
+                               'Disregarding Byte {0}, ascii: [{1}]'.format(hex(byte[0]), byte)
                                )
 
                 else:
@@ -363,7 +363,6 @@ def decompress(bytesObj):
     bufferObj.seek(0, 0)
     yaz0obj = yaz0(bufferObj, None, compress=False)
     return yaz0obj.decompress().getvalue()
-print(decompress)
 
 # Take a file-like object, decompress it and return the
 # result as a BytesIO object.
