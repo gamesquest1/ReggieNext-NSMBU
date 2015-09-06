@@ -99,22 +99,13 @@ settings = None
 
 
 # Game enums
-NewSuperMarioBros = 0
-NewSuperMarioBrosWii = 1
-NewSuperMarioBros2 = 2
 NewSuperMarioBrosU = 3
 NewSuperLuigiU = 4
 FileExtentions = {
-    NewSuperMarioBros: (),
-    NewSuperMarioBrosWii: ('.arc', '.arc.LH'),
-    NewSuperMarioBros2: ('.szs',),
     NewSuperMarioBrosU: ('.szs',),
     NewSuperLuigiU: ('.szs',),
     }
 FirstLevels = {
-    NewSuperMarioBros: '',
-    NewSuperMarioBrosWii: '01-01',
-    NewSuperMarioBros2: '1-1',
     NewSuperMarioBrosU: '1-1',
     NewSuperLuigiU: '1-1',
     }
@@ -257,8 +248,7 @@ def FilesAreMissing():
         return True
 
     required = ['entrances.png', 'entrancetypes.txt', 'icon.png', 'levelnames.xml', 'overrides.png',
-                'spritedata.xml', 'tilesets.xml', 'bga/000A.png', 'bga.txt', 'bgb/000A.png', 'bgb.txt',
-                'about.png', 'spritecategories.xml']
+                'spritedata.xml', 'tilesets.xml', 'about.png', 'spritecategories.xml']
 
     missing = []
 
@@ -483,78 +473,7 @@ def LoadObjDescriptions(reload_=False):
         for line in raw:
             w = line.split('=')
             ObjDesc[int(w[0])] = w[1]
-
-
-BgANames = None
-def LoadBgANames(reload_=False):
-    """
-    Ensures that the background name info is loaded
-    """
-    global BgANames
-    if (BgANames is not None) and not reload_: return
-
-    paths, isPatch = gamedef.recursiveFiles('bga', True)
-    if isPatch:
-        new = []
-        new.append(trans.files['bga'])
-        for path in paths: new.append(path)
-        paths = new
-
-    BgANames = []
-    for path in paths:
-        f = open(path)
-        raw = [x.strip() for x in f.readlines()]
-        f.close()
-
-        for line in raw:
-            w = line.split('=')
-
-            found = False
-            for check in BgANames:
-                if check[0] == w[0]:
-                    check[1] = w[1]
-                    found = True
-
-            if not found: BgANames.append([w[0], w[1]])
-
-        BgANames = sorted(BgANames, key=lambda entry: int(entry[0], 16))
-
-
-BgBNames = None
-def LoadBgBNames(reload_=False):
-    """
-    Ensures that the background name info is loaded
-    """
-    global BgBNames
-    if (BgBNames is not None) and not reload_: return
-
-    paths, isPatch = gamedef.recursiveFiles('bgb', True)
-    if isPatch:
-        new = []
-        new.append(trans.files['bgb'])
-        for path in paths: new.append(path)
-        paths = new
-
-    BgBNames = []
-    for path in paths:
-        f = open(path)
-        raw = [x.strip() for x in f.readlines()]
-        f.close()
-
-        for line in raw:
-            w = line.split('=')
-
-            found = False
-            for check in BgBNames:
-                if check[0] == w[0]:
-                    check[1] = w[1]
-                    found = True
-
-            if not found: BgBNames.append([w[0], w[1]])
-
-        BgBNames = sorted(BgBNames, key=lambda entry: int(entry[0], 16))
-
-
+            
 def LoadConstantLists():
     """
     Loads some lists of constants
@@ -1561,14 +1480,6 @@ class AbstractBackground():
 
     def save(idnum=0):
         return b''
-
-
-class Background_NSMBW(AbstractBackground):
-    """
-    A class that represents a background from New Super Mario Bros. Wii
-    """
-    pass # not yet implemented
-
 
 class Background_NSMBU(AbstractBackground):
     """
@@ -6432,12 +6343,6 @@ def LoadGameDef(name=None, dlg=None):
             mainWindow.spriteDataEditor.update()
         if dlg: dlg.setValue(2)
 
-        # Load BgA/BgB names
-        if dlg: dlg.setLabelText(trans.string('Gamedefs', 9)) # Loading background names...
-        LoadBgANames(True)
-        LoadBgBNames(True)
-        if dlg: dlg.setValue(3)
-
         # Reload tilesets
         if dlg: dlg.setLabelText(trans.string('Gamedefs', 10)) # Reloading tilesets...
         LoadObjDescriptions(True) # reloads ts1_descriptions
@@ -6544,8 +6449,6 @@ class ReggieGameDefinition():
         self.sprites = sprites
 
         self.files = {
-            'bga': gdf(None, False),
-            'bgb': gdf(None, False),
             'entrancetypes': gdf(None, False),
             'levelnames': gdf(None, False),
             'music': gdf(None, False),
@@ -6557,8 +6460,6 @@ class ReggieGameDefinition():
             'ts1_descriptions': gdf(None, False),
             }
         self.folders = {
-            'bga': gdf(None, False),
-            'bgb': gdf(None, False),
             'sprites': gdf(None, False),
             }
 
@@ -9224,10 +9125,6 @@ class BGTab(QtWidgets.QWidget):
         self.createBGViewers(z)
 
         mainLayout = QtWidgets.QGridLayout()
-        mainLayout.addWidget(self.BGASettings, 0, 0)
-        mainLayout.addWidget(self.BGBSettings, 1, 0)
-        mainLayout.addWidget(self.BGAViewer, 0, 1)
-        mainLayout.addWidget(self.BGBViewer, 1, 1)
         self.setLayout(mainLayout)
 
         self.updatePreviews()
@@ -9237,144 +9134,12 @@ class BGTab(QtWidgets.QWidget):
         """
         Creates the BG Settings for BGA and BGB
         """
-        for slot in ('A', 'B'):
-            g = QtWidgets.QGroupBox(trans.string('BGDlg', 3 if slot == 'A' else 4)) # 'Scenery' or 'Backdrop'
-            exec('self.BG%sSettings = g' % slot)
-
-
-            # BG Comboboxes
-            exec("""
-            self.hex1%s = HexSpinBox()
-            self.hex2%s = HexSpinBox()
-            self.hex3%s = HexSpinBox()
-            self.name1%s = QtWidgets.QComboBox()
-            self.name2%s = QtWidgets.QComboBox()
-            self.name3%s = QtWidgets.QComboBox()
-            for box in (self.hex1%s, self.hex2%s, self.hex3%s):
-                box.setRange(0, 0xFFFF)
-            self.hex1%s.setValue(z.bg1%s)
-            self.hex2%s.setValue(z.bg2%s)
-            self.hex3%s.setValue(z.bg3%s)
-            self.hex1%s.valueChanged.connect(self.handleHexBox)
-            self.hex2%s.valueChanged.connect(self.handleHexBox)
-            self.hex3%s.valueChanged.connect(self.handleHexBox)
-            self.name1%s.activated.connect(self.handleNameBox)
-            self.name2%s.activated.connect(self.handleNameBox)
-            self.name3%s.activated.connect(self.handleNameBox)
-            for bfile_raw, bname in Bg%sNames:
-                bfile = int(bfile_raw, 16)
-                self.name1%s.addItem(trans.string('BGDlg', 17, '[name]', bname, '[hex]', '%04X' % bfile), bfile)
-                self.name2%s.addItem(trans.string('BGDlg', 17, '[name]', bname, '[hex]', '%04X' % bfile), bfile)
-                self.name3%s.addItem(trans.string('BGDlg', 17, '[name]', bname, '[hex]', '%04X' % bfile), bfile)
-                if z.bg1%s == bfile: self.name1%s.setCurrentIndex(self.name1%s.count() - 1)
-                if z.bg2%s == bfile: self.name2%s.setCurrentIndex(self.name2%s.count() - 1)
-                if z.bg3%s == bfile: self.name3%s.setCurrentIndex(self.name3%s.count() - 1)
-            """.replace('%s', slot).replace('            ', ''))
-
-
-            # Position
-            exec("""
-            self.xpos%s = QtWidgets.QSpinBox()
-            self.xpos%s.setToolTip(trans.string('BGDlg', 7))
-            self.xpos%s.setRange(-256, 255)
-            self.xpos%s.setValue(z.Xposition%s)
-
-            self.ypos%s = QtWidgets.QSpinBox()
-            self.ypos%s.setToolTip(trans.string('BGDlg', 9))
-            self.ypos%s.setRange(-255, 256)
-            self.ypos%s.setValue(-z.Yposition%s)
-            """.replace('%s', slot).replace('            ', ''))
-
-
-            # Scrolling
-            exec("""
-            self.xscroll%s = QtWidgets.QComboBox()
-            self.xscroll%s.addItems(BgScrollRateStrings)
-            self.xscroll%s.setToolTip(trans.string('BGDlg', 11))
-            if z.Xscroll%s < 0: z.Xscroll%s = 0
-            if z.Xscroll%s >= len(BgScrollRates): z.Xscroll%s = len(BgScrollRates)
-            self.xscroll%s.setCurrentIndex(z.Xscroll%s)
-
-            self.yscroll%s = QtWidgets.QComboBox()
-            self.yscroll%s.addItems(BgScrollRateStrings)
-            self.yscroll%s.setToolTip(trans.string('BGDlg', 12))
-            if z.Yscroll%s < 0: z.Yscroll%s = 0
-            if z.Yscroll%s >= len(BgScrollRates): z.Yscroll%s = len(BgScrollRates)
-            self.yscroll%s.setCurrentIndex(z.Yscroll%s)
-            """.replace('%s', slot).replace('            ', ''))
-
-
-            # Zoom
-            exec("""
-            self.zoom%s = QtWidgets.QComboBox()
-            addstr = trans.stringList('BGDlg', 15)
-            self.zoom%s.addItems(addstr)
-            self.zoom%s.setToolTip(trans.string('BGDlg', 14))
-            self.zoom%s.setCurrentIndex(z.Zoom%s)
-            """.replace('%s', slot).replace('            ', ''))
-
-
-            # Labels
-            bgLabel = QtWidgets.QLabel(trans.string('BGDlg', 19))
-            positionLabel = QtWidgets.QLabel(trans.string('BGDlg', 5))
-            scrollLabel = QtWidgets.QLabel(trans.string('BGDlg', 10))
-            alignLabel = QtWidgets.QLabel(trans.string('BGDlg', 16))
-
-
-            # Layouts
-            exec("""
-            Lpos = QtWidgets.QFormLayout()
-            Lpos.addRow(trans.string('BGDlg', 6), self.xpos%s)
-            Lpos.addRow(trans.string('BGDlg', 8), self.ypos%s)
-
-            Lscroll = QtWidgets.QFormLayout()
-            Lscroll.addRow(trans.string('BGDlg', 6), self.xscroll%s)
-            Lscroll.addRow(trans.string('BGDlg', 8), self.yscroll%s)
-
-            Lzoom = QtWidgets.QFormLayout()
-            Lzoom.addRow(trans.string('BGDlg', 13), self.zoom%s)
-            """.replace('%s', slot).replace('            ', ''))
-
-
-            exec("""
-            mainLayout = QtWidgets.QGridLayout()
-            mainLayout.addWidget(bgLabel, 0, 0, 1, 2)
-            mainLayout.addWidget(self.hex1%s, 1, 0)
-            mainLayout.addWidget(self.hex2%s, 2, 0)
-            mainLayout.addWidget(self.hex3%s, 3, 0)
-            mainLayout.addWidget(self.name1%s, 1, 1)
-            mainLayout.addWidget(self.name2%s, 2, 1)
-            mainLayout.addWidget(self.name3%s, 3, 1)
-            mainLayout.addWidget(positionLabel, 4, 0)
-            mainLayout.addLayout(Lpos, 5, 0)
-            mainLayout.addWidget(scrollLabel, 4, 1)
-            mainLayout.addLayout(Lscroll, 5, 1)
-            mainLayout.addLayout(Lzoom, 6, 0, 1, 2)
-            mainLayout.setRowStretch(7, 1)
-            self.BG%sSettings.setLayout(mainLayout)
-            """.replace('%s', slot).replace('            ', ''))
+        pass
 
 
 
     def createBGViewers(self, z):
-        for slot in ('A', 'B'):
-            g = QtWidgets.QGroupBox(trans.string('BGDlg', 16)) # Preview
-            exec('self.BG%sViewer = g' % slot)
-
-            exec("""
-            self.preview1%s = QtWidgets.QLabel()
-            self.preview2%s = QtWidgets.QLabel()
-            self.preview3%s = QtWidgets.QLabel()
-            self.align%s = QtWidgets.QLabel()
-
-            mainLayout = QtWidgets.QGridLayout()
-            mainLayout.addWidget(self.preview1%s, 0, 0)
-            mainLayout.addWidget(self.preview2%s, 0, 1)
-            mainLayout.addWidget(self.preview3%s, 0, 2)
-            mainLayout.addWidget(self.align%s, 1, 0, 1, 3)
-            mainLayout.setRowStretch(2, 1)
-            self.BG%sViewer.setLayout(mainLayout)
-            """.replace('%s', slot).replace('            ', ''))
+        pass
 
 
     @QtCore.pyqtSlot()
@@ -9420,71 +9185,14 @@ class BGTab(QtWidgets.QWidget):
         """
         Updates all 6 preview labels
         """
-        scale = 0.75
-        for slot in ('A', 'B'):
-            for boxnum in (1, 2, 3):
-                val = eval('self.hex%d%s' % (boxnum, slot)).value()
-                val = '%04X' % val
-
-                filename = gamedef.bgFile(val + '.png', slot.lower())
-                if not os.path.isfile(filename):
-                    filename = 'reggiedata/bg%s/no_preview.png' % slot.lower()
-                pix = QtGui.QPixmap(filename)
-                pix = pix.scaled(pix.width() * scale, pix.height() * scale)
-                eval('self.preview%d%s' % (boxnum, slot)).setPixmap(pix)
-
-            # Alignment mode
-            box1 = eval('self.hex1%s' % slot).value()
-            box2 = eval('self.hex2%s' % slot).value()
-            box3 = eval('self.hex3%s' % slot).value()
-            alignText = trans.stringList('BGDlg', 21)[calculateBgAlignmentMode(box1, box2, box3)]
-            alignText = trans.string('BGDlg', 20, '[mode]', alignText)
-            eval('self.align%s' % slot).setText(alignText)
+        pass
 
 
 def calculateBgAlignmentMode(idA, idB, idC):
     """
     Calculates alignment modes using the exact same logic as NSMBW
     """
-    # This really is RE'd ASM translated to Python, mostly
-
-    if idA <= 0x000A: idA = 0
-    if idB <= 0x000A: idB = 0
-    if idC <= 0x000A: idC = 0
-
-    if ((idA == 0) and (idB == 0)) or (idC == 0):
-        # Either both the first two are empty or the last one is empty
-        return 0
-    elif (idA == idC) and (idB == idC):
-        # They are all the same
-        return 5
-    elif (idA == idC) and (idB != idC) and (idB != 0):
-        # The first and last ones are the same, but
-        # the middle one is different (not empty, though)
-        return 1
-    elif (idC == idB) and (idA != idC) and (idA != 0):
-        # The second and last ones are the same, but
-        # the first one is different (not empty, though)
-        return 2
-    elif (idB == 0) and (idA != idC) and (idA != 0):
-        # The middle one is empty. The first and last
-        # ones are different, and the first one is not
-        # empty
-        return 3
-    elif (idA == 0) and (idB != idC) and (idB != 0):
-        # The first one is empty. The second and last
-        # ones are different, and the second one is not
-        # empty
-        return 4
-    elif (idA == idB) and (idA != 0) and (idB != 0):
-        # The first two match, and are not empty
-        return 6
-    elif (idA != 0) and (idA != 0) and (idB != 0):
-        # Every single one is not empty
-        return 7
-    else:
-        # Doesn't fit into any of the above categories
-        return 0
+    return 0
 
 
 
@@ -10324,30 +10032,6 @@ class DiagnosticToolDialog(QtWidgets.QDialog):
         """
         Checks if there are custom background IDs in this area
         """
-        global Area
-        global BgANames
-        global BgBNames
-
-        for z in Area.zones:
-            for name in ('1A', '2A', '3A', '1B', '2B', '3B'):
-                bg = eval('z.bg%s' % name)
-                id = '%04X' % bg
-                if name[1] == 'A': check = BgANames
-                else: check = BgBNames
-
-                found = False
-                for entry in check:
-                    if id in entry: found = True
-
-                if not found:
-                    if mode == 'c': return True
-                    else:
-                        if   name == '1A': z.bg1A = 1
-                        elif name == '2A': z.bg2A = 1
-                        elif name == '3A': z.bg3A = 1
-                        elif name == '1B': z.bg1B = 1
-                        elif name == '2B': z.bg2B = 1
-                        elif name == '3B': z.bg3B = 1
         return False
 
 
@@ -10932,88 +10616,7 @@ class GameDefMenu(QtWidgets.QMenu):
     """
     A menu which lets the user pick gamedefs
     """
-    gameChanged = QtCore.pyqtSignal()
-    def __init__(self):
-        """
-        Creates and initializes the menu
-        """
-        QtWidgets.QMenu.__init__(self)
-
-        # Add the gamedef viewer widget
-        self.currentView = GameDefViewer()
-        self.currentView.setMinimumHeight(100)
-        self.gameChanged.connect(self.currentView.updateLabels)
-
-        v = QtWidgets.QWidgetAction(self)
-        v.setDefaultWidget(self.currentView)
-        self.addAction(v)
-        self.addSeparator()
-
-        # Add entries for each gamedef
-        self.GameDefs = getAvailableGameDefs()
-
-        self.actGroup = QtWidgets.QActionGroup(self)
-        loadedDef = setting('LastGameDef')
-        for folder in self.GameDefs:
-            def_ = ReggieGameDefinition(folder)
-            act = QtWidgets.QAction(self)
-            act.setText(def_.name)
-            act.setToolTip(def_.description)
-            act.setData(folder)
-            act.setActionGroup(self.actGroup)
-            act.setCheckable(True)
-            if folder == loadedDef:
-                act.setChecked(True)
-                first = False
-            act.toggled.connect(self.handleGameDefClicked)
-            self.addAction(act)
-
-    def handleGameDefClicked(self, checked):
-        """
-        Handles the user clicking a gamedef
-        """
-        if not checked: return
-
-        name = self.actGroup.checkedAction().data()
-        loadNewGameDef(name)
-        self.gameChanged.emit()
-
-
-
-def getAvailableGameDefs():
-    GameDefs = []
-
-    # Add them
-    folders = os.listdir('reggiedata/games')
-    for folder in folders:
-        if not os.path.isdir('reggiedata/games/' + folder): continue
-        inFolder = os.listdir('reggiedata/games/' + folder)
-        if 'main.xml' not in inFolder: continue
-        def_ = ReggieGameDefinition(folder)
-        if def_.custom: GameDefs.append((def_, folder))
-
-    # Alphabetize them, and then add the default
-    GameDefs = sorted(GameDefs, key=lambda def_: def_[0].name)
-    new = [None]
-    for item in GameDefs: new.append(item[1])
-    return new
-
-def loadNewGameDef(def_):
-    """
-    Loads ReggieGameDefinition def_, and displays a progress dialog
-    """
-    dlg = QtWidgets.QProgressDialog()
-    dlg.setAutoClose(True)
-    btn = QtWidgets.QPushButton('Cancel')
-    btn.setEnabled(False)
-    dlg.setCancelButton(btn)
-    dlg.show()
-    dlg.setValue(0)
-
-    LoadGameDef(def_, dlg)
-
-    dlg.setValue(100)
-    del dlg
+    pass
 
 
 
@@ -16362,8 +15965,6 @@ def main():
     SetAppStyle()
     LoadTilesetNames()
     LoadObjDescriptions()
-    LoadBgANames()
-    LoadBgBNames()
     LoadSpriteData()
     LoadSpriteListData()
     LoadEntranceNames()

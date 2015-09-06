@@ -34,6 +34,7 @@ import tile
 from PyQt5 import QtCore, QtGui, QtWidgets # if reggie.py has it, this should have it
 import SARC as SarcLib
 import spritelib as SLib
+import struct
 
 class AbstractLevel():
     """
