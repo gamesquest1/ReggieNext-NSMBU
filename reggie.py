@@ -14410,20 +14410,10 @@ class ReggieWindow(QtWidgets.QMainWindow):
         if app.splashscrn is not None:
             updateSplash(trans.string('Splash', 2), 0)
 
-        # Load the actual level for this specific game
-        if game is NewSuperMarioBros:
-            # This game is not supported... YET
-            raise NotImplementedError
-        elif game is NewSuperMarioBrosWii:
-            self.LoadLevel_NSMBW(levelData, areaNum, progress)
-        elif game is NewSuperMarioBros2:
+        if game is NewSuperMarioBrosU:
             self.LoadLevel_NSMBU(levelData, areaNum, progress)
-        elif game is NewSuperMarioBrosU:
-            # This game is not supported... YET
-            raise NotImplementedError
         elif game is NewSuperLuigiU:
-            # This game is not supported... YET
-            raise NotImplementedError
+            self.LoadLevel_NSMBU(levelData, areaNum, progress)
 
         # Set the level overview settings
         mainWindow.levelOverview.maxX = 100
