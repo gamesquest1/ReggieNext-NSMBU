@@ -624,6 +624,7 @@
     <value nybble="20" title="Unknown Value 20" comment="Sprite 390 is on steroids with this option used."/>
     <value nybble="21-22" title="Movement ID" comment="Use this to assign coins and other objects to this sprite."/>
     <value nybble="24" title="Some kind of ID" comment="Only used as 1."/>
+</sprite>
 <sprite id="70" name="Movement Controller - Two-Way" notes="Moves a certain direction when hooked to a sprite. You do not need a path for this.">
     <checkbox nybble="6" title="Slower direction change speed"/>
     <list nybble="8" title="Direction" comment="Sets the initial direction. Needs to be double-checked.">
@@ -634,8 +635,8 @@
     </list>
     <value nybble="9" title="Unknown Value 9"/>
     <value nybble="12" title="Unknown Value 12"/>
-    <value nybble="13" title="Delay at highest point"comment="when direction is set to UP/DOWN"/>
-    <value nybble="14" title="Delay at lowest point"comment="when direction is set to UP/DOWN"/>
+    <value nybble="13" title="Delay at highest point" comment="when direction is set to UP/DOWN"/>
+    <value nybble="14" title="Delay at lowest point" comment="when direction is set to UP/DOWN"/>
     <value nybble="15" title="Distance" comment="Distance the linked sprite moves in blocks."/>
     <value nybble="16" title="Speed" comment="seems 7 is max"/>
     <value nybble="18" title="Unknown Value 18"/>
